@@ -14,7 +14,8 @@ CheckCam transforms an ordinary USB webcam or RTSP camera stream into an intelli
 - **SQLite + `sqlite-vec`**: 768-dimensional vector embeddings stored directly in SQLite for sub-millisecond nearest-neighbor search.
 - **Auto Storage Pruning**: Discarded events (empty rooms, headlights, moving shadows) are physically deleted from disk automatically.
 - **Telegram Alert Dispatch**: Delivers instant notification messages with high-confidence event snapshots directly to your Telegram chat.
-- **React Studio UI**: Modern dark-themed single-page application served directly by FastAPI with live clip preview, video playback, and dynamic rule management.
+- **React Studio UI**: Modern dark-themed single-page application served directly by FastAPI with semantic clip search, video playback, and a dedicated **Settings & Rules** tab for live configuration.
+- **Dynamic In-DB Settings**: Camera hardware, motion sensitivity, clip duration (max 10s), AI thresholds, and Telegram alerting are stored in SQLite and configurable live from the browser without editing files.
 - **Zero-Copy IPC Architecture**: Standalone capture daemon communicates with the in-memory AI engine over non-blocking ZeroMQ IPC sockets.
 
 ---

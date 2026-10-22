@@ -66,6 +66,25 @@ class ClipProcessor:
             rules=[f"[{cmd}] {desc}" for cmd, desc in self.rule_labels]
         )
 
+    def update_dynamic_settings(self, settings: dict):
+        """Update runtime settings like confidence_threshold, keyframes_per_clip, and telegram alerter."""
+        if "rules" in settings and "confidence_threshold" in settings["rules"]:
+            self.confidence_threshold = float(settings["rules"]["confidence_threshold"])
+        if "model" in settings and "keyframes_per_clip" in settings["model"]:
+            self.keyframes_per_clip = int(settings["model"]["keyframes_per_clip"])
+        if "telegram" in settings:
+            tg = settings["telegram"]
+            if tg.get("enabled") and tg.get("bot_token"):
+                self.alerter = TelegramAlerter(tg["bot_token"], tg.get("chat_id", ""))
+            else:
+                self.alerter = None
+        logger.info(
+            "processor_dynamic_settings_updated",
+            confidence_threshold=self.confidence_threshold,
+            keyframes_per_clip=self.keyframes_per_clip,
+            telegram_enabled=self.alerter is not None
+        )
+
     def extract_keyframes(self, video_path: str) -> list[Image.Image]:
         """
         Extract uniformly spaced keyframes from a video clip.
@@ -333,3 +352,8 @@ class ProcessorWorker(threading.Thread):
     def stop(self):
         """Signal the worker thread to terminate."""
         self._stop_event.set()
+
+    def update_dynamic_settings(self, settings: dict):
+        """Forward dynamic setting updates to the inner ClipProcessor."""
+        if self.processor:
+            self.processor.update_dynamic_settings(settings)

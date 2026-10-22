@@ -243,9 +243,28 @@ def run_capture_daemon(config_path: str = "config.yaml"):
 
     frames_per_clip = cfg.camera.fps * cfg.recording.clip_duration_sec
     frame_delay = 1.0 / cfg.camera.fps
+    last_settings_check = time.time()
 
     try:
         while True:
+            # Periodically reload dynamic settings from database without restarting daemon
+            now = time.time()
+            if now - last_settings_check > 5.0:
+                last_settings_check = now
+                try:
+                    cur_settings = db.get_settings()
+                    rec = cur_settings.get("recording", {})
+                    st = cur_settings.get("storage", {})
+                    detector.threshold = rec.get("motion_threshold", detector.threshold)
+                    detector.min_area_pct = rec.get("min_motion_area_pct", detector.min_area_pct)
+                    new_dur = min(rec.get("clip_duration_sec", cfg.recording.clip_duration_sec), 10)
+                    frames_per_clip = cfg.camera.fps * new_dur
+                    if "clip_dir" in st and st["clip_dir"]:
+                        writer.clip_dir = Path(st["clip_dir"])
+                        writer.clip_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.debug("capture_settings_sync_error", error=str(e))
+
             ret, frame = cap.read()
             if not ret:
                 logger.warning("frame_read_failed")

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Search, Video, ShieldAlert, Sparkles, Clock, Play, 
-  X, Filter, RefreshCw, Settings, Sliders, ExternalLink, Download
+  X, Filter, RefreshCw, Settings, Sliders, ExternalLink, Download,
+  Check, Save, Plus, Trash2, Camera, Bell, HardDrive, Cpu, AlertTriangle, Send, Film
 } from 'lucide-react';
 import './App.css';
 
@@ -15,28 +16,51 @@ const QUICK_SUGGESTIONS = [
 ];
 
 export default function App() {
+  // Navigation
+  const [activeTab, setActiveTab] = useState('studio'); // 'studio' | 'settings'
+
+  // Studio state
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(12);
   const [clips, setClips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [selectedClip, setSelectedClip] = useState(null);
-  const [systemStatus, setSystemStatus] = useState({ online: true, modelLoaded: true });
-  const [captureStatus, setCaptureStatus] = useState({ watching: false, status: 'standby' });
   const [isSearchResult, setIsSearchResult] = useState(false);
   const [lastQuery, setLastQuery] = useState('');
-  const [rulesModalOpen, setRulesModalOpen] = useState(false);
+
+  // System & Capture Health state
+  const [systemStatus, setSystemStatus] = useState({ online: true, modelLoaded: true });
+  const [captureStatus, setCaptureStatus] = useState({ watching: false, status: 'standby' });
+
+  // Rules & Actions state
   const [rules, setRules] = useState([]);
   const [actions, setActions] = useState([]);
   const [newRuleDesc, setNewRuleDesc] = useState('');
   const [newRuleActionId, setNewRuleActionId] = useState(2);
+  const [rulesReloading, setRulesReloading] = useState(false);
 
-  // Initial load: fetch clips, health, capture status & start polling
+  // Dynamic Settings state
+  const [settings, setSettings] = useState({
+    camera: { source: 0, fps: 15, resolution: [640, 480] },
+    recording: { clip_duration_sec: 5, motion_threshold: 25, min_motion_area_pct: 1.5 },
+    storage: { clip_dir: './data/clips' },
+    model: { keyframes_per_clip: 3 },
+    rules: { confidence_threshold: 0.05 },
+    telegram: { enabled: false, bot_token: '', chat_id: '' }
+  });
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [telegramTesting, setTelegramTesting] = useState(false);
+  const [telegramResult, setTelegramResult] = useState(null);
+
+  // Initial load
   useEffect(() => {
     fetchRecentClips();
     checkHealth();
     checkCaptureStatus();
     fetchRulesAndActions();
+    fetchSettings();
 
     const interval = setInterval(() => {
       checkHealth();
@@ -45,12 +69,11 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Keyboard shortcut: Escape to close modal
+  // Keyboard shortcut: Escape to close video player modal
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         setSelectedClip(null);
-        setRulesModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -68,10 +91,7 @@ export default function App() {
         });
       }
     } catch (e) {
-      setSystemStatus({
-        online: false,
-        modelLoaded: false
-      });
+      setSystemStatus({ online: false, modelLoaded: false });
     }
   };
 
@@ -86,10 +106,7 @@ export default function App() {
         });
       }
     } catch (e) {
-      setCaptureStatus({
-        watching: false,
-        status: 'standby'
-      });
+      setCaptureStatus({ watching: false, status: 'standby' });
     }
   };
 
@@ -119,6 +136,18 @@ export default function App() {
       if (actionsRes.ok) setActions(await actionsRes.json());
     } catch (e) {
       console.error("Failed to fetch rules", e);
+    }
+  };
+
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch('/api/settings');
+      if (res.ok) {
+        const data = await res.json();
+        setSettings(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch settings", e);
     }
   };
 
@@ -159,11 +188,15 @@ export default function App() {
   const handleAddRule = async (e) => {
     e.preventDefault();
     if (!newRuleDesc.trim()) return;
+
     try {
       const res = await fetch('/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: newRuleDesc.trim(), action_id: newRuleActionId })
+        body: JSON.stringify({
+          description: newRuleDesc.trim(),
+          action_id: parseInt(newRuleActionId, 10)
+        })
       });
       if (res.ok) {
         setNewRuleDesc('');
@@ -185,7 +218,68 @@ export default function App() {
     }
   };
 
-  // Filter clips
+  const handleReloadRules = async () => {
+    setRulesReloading(true);
+    try {
+      await fetch('/rules/reload', { method: 'POST' });
+    } catch (e) {
+      console.error("Failed to reload rules", e);
+    } finally {
+      setRulesReloading(false);
+    }
+  };
+
+  const handleSaveSettings = async (e) => {
+    if (e) e.preventDefault();
+    setSettingsSaving(true);
+    setSaveSuccess(false);
+
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSettings(data.settings);
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
+      }
+    } catch (e) {
+      console.error("Failed to save settings", e);
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleTestTelegram = async () => {
+    setTelegramTesting(true);
+    setTelegramResult(null);
+
+    try {
+      const res = await fetch('/api/telegram/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bot_token: settings.telegram.bot_token,
+          chat_id: settings.telegram.chat_id
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTelegramResult({ success: true, message: data.message || "Test alert delivered!" });
+      } else {
+        setTelegramResult({ success: false, message: data.detail || "Failed to deliver test alert." });
+      }
+    } catch (e) {
+      setTelegramResult({ success: false, message: "Network connection error" });
+    } finally {
+      setTelegramTesting(false);
+    }
+  };
+
+  // Filter clips in Studio
   const filteredClips = clips.filter(clip => {
     if (activeFilter === 'ALERT') return clip.action === 'ALERTED';
     if (activeFilter === 'SAVE') return clip.action === 'SAVED';
@@ -217,6 +311,25 @@ export default function App() {
           </div>
         </div>
 
+        {/* Tab Switcher */}
+        <div className="nav-tabs">
+          <button 
+            className={`nav-tab-btn ${activeTab === 'studio' ? 'active' : ''}`}
+            onClick={() => setActiveTab('studio')}
+          >
+            <Film size={16} />
+            <span>Events Studio</span>
+          </button>
+          <button 
+            className={`nav-tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            <Sliders size={16} />
+            <span>Settings & Rules</span>
+          </button>
+        </div>
+
+        {/* Health Status & Refresh */}
         <div className="header-actions">
           {/* AI Model Status */}
           <div className={`status-pill ${systemStatus.online && systemStatus.modelLoaded ? 'status-pill-active' : 'status-pill-inactive'}`}>
@@ -224,7 +337,7 @@ export default function App() {
             <span>{systemStatus.online ? 'Model Resident & Live' : 'Connecting...'}</span>
           </div>
 
-          {/* Capture Daemon Status: Live Watching vs Disabled/Standby */}
+          {/* Capture Daemon Status */}
           <div 
             className={`status-pill ${captureStatus.watching ? 'status-pill-active' : 'status-pill-standby'}`}
             title={`Capture Daemon (${captureStatus.watching ? 'Active & Watching' : 'Disabled / Standby'})`}
@@ -235,208 +348,663 @@ export default function App() {
 
           <button 
             className="btn-secondary"
-            onClick={() => setRulesModalOpen(true)}
-            title="Classification Rules"
+            onClick={() => {
+              if (activeTab === 'studio') fetchRecentClips();
+              else {
+                fetchSettings();
+                fetchRulesAndActions();
+              }
+            }}
+            title="Refresh"
           >
-            <Sliders size={16} />
-            <span>Rules ({rules.length})</span>
-          </button>
-
-          <button 
-            className="btn-secondary"
-            onClick={fetchRecentClips}
-            title="Refresh latest camera events"
-          >
-            <RefreshCw size={16} className={loading && !isSearchResult ? 'spinner' : ''} />
+            <RefreshCw size={16} className={loading ? 'spinner' : ''} />
           </button>
         </div>
       </header>
 
-      {/* Main Search Section */}
-      <section className="search-card glass-card">
-        <div className="search-header-row">
-          <div className="search-label">
-            <Sparkles size={16} color="var(--accent-cyan)" />
-            <span>Natural Language Semantic Video Search</span>
-          </div>
-          <span className="search-hint">Press Enter ↵ to search</span>
-        </div>
+      {/* ===================== TAB 1: STUDIO ===================== */}
+      {activeTab === 'studio' && (
+        <main className="fade-in">
+          {/* Main Search Section */}
+          <section className="search-card glass-card">
+            <div className="search-header-row">
+              <div className="search-label">
+                <Sparkles size={16} color="var(--accent-cyan)" />
+                <span>Natural Language Semantic Video Search</span>
+              </div>
+              <span className="search-hint">Press Enter ↵ to search</span>
+            </div>
 
-        <div className="search-input-wrapper">
-          <textarea
-            className="search-textarea"
-            placeholder="Describe what you are looking for in natural language... (e.g. 'a person walking past', 'someone holding a bottle', 'car entering driveway')"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDownOnTextarea}
-            rows={2}
-          />
-        </div>
+            <div className="search-input-wrapper">
+              <textarea
+                className="search-textarea"
+                placeholder="Describe what you are looking for in natural language... (e.g. 'a person walking past', 'someone holding a bottle', 'car entering driveway')"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleKeyDownOnTextarea}
+                rows={2}
+              />
+            </div>
 
-        <div className="search-bottom-bar">
-          <div className="suggestions-row">
-            <span className="suggestions-label">Try:</span>
-            {QUICK_SUGGESTIONS.map((sug, i) => (
+            <div className="search-bottom-bar">
+              <div className="suggestions-row">
+                <span className="suggestions-label">Try:</span>
+                {QUICK_SUGGESTIONS.map((sug, i) => (
+                  <button 
+                    key={i} 
+                    className="suggestion-chip"
+                    onClick={() => {
+                      setQuery(sug);
+                      handleSearch(sug);
+                    }}
+                  >
+                    {sug}
+                  </button>
+                ))}
+              </div>
+
+              <div className="search-controls">
+                <select 
+                  className="limit-select"
+                  value={limit}
+                  onChange={(e) => setLimit(e.target.value)}
+                >
+                  <option value="6">Top 6</option>
+                  <option value="12">Top 12</option>
+                  <option value="24">Top 24</option>
+                  <option value="48">Top 48</option>
+                </select>
+
+                <button 
+                  className="btn-primary"
+                  onClick={() => handleSearch()}
+                  disabled={loading}
+                >
+                  <Search size={18} className={loading ? 'spinner' : ''} />
+                  <span>{loading ? 'Searching...' : 'Search Clips'}</span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {/* Filter Bar & Feed Controls */}
+          <section className="feed-header-bar">
+            <div className="filter-group">
               <button 
-                key={i} 
-                className="suggestion-chip"
-                onClick={() => {
-                  setQuery(sug);
-                  handleSearch(sug);
-                }}
+                className={`filter-btn ${activeFilter === 'ALL' ? 'active' : ''}`}
+                onClick={() => setActiveFilter('ALL')}
               >
-                {sug}
+                All Clips
               </button>
-            ))}
+              <button 
+                className={`filter-btn ${activeFilter === 'SAVED' ? 'active' : ''}`}
+                onClick={() => setActiveFilter('SAVED')}
+              >
+                Saved
+              </button>
+              <button 
+                className={`filter-btn ${activeFilter === 'ALERT' ? 'active' : ''}`}
+                onClick={() => setActiveFilter('ALERT')}
+              >
+                Alerted
+              </button>
+            </div>
+
+            <div className="feed-status-info">
+              {isSearchResult ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span className="search-query-tag">Query: "{lastQuery}"</span>
+                  <button 
+                    className="clear-search-btn"
+                    onClick={() => {
+                      setQuery('');
+                      fetchRecentClips();
+                    }}
+                  >
+                    Clear Search
+                  </button>
+                </div>
+              ) : (
+                <span className="feed-count-text">
+                  Showing <strong>{filteredClips.length}</strong> recent activity clips
+                </span>
+              )}
+            </div>
+          </section>
+
+          {/* Video Clips Grid */}
+          <section className="clips-grid">
+            {filteredClips.map((clip) => {
+              const isAlert = clip.action === 'ALERTED';
+              return (
+                <article 
+                  key={clip.clip_id}
+                  className={`clip-card glass-card ${isAlert ? 'clip-alert-card' : ''}`}
+                  onClick={() => setSelectedClip(clip)}
+                >
+                  <div className="thumbnail-container">
+                    {clip.thumbnail_url ? (
+                      <img 
+                        src={clip.thumbnail_url} 
+                        alt={`Clip ${clip.clip_id} keyframe`}
+                        className="clip-thumb-img"
+                        loading="lazy"
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <div className="thumb-placeholder">
+                        <Video size={36} color="var(--text-muted)" />
+                        <span style={{ fontSize: '0.75rem', marginTop: '6px' }}>Clip #{clip.clip_id}</span>
+                      </div>
+                    )}
+
+                    <div className="thumbnail-overlay">
+                      <div className="play-circle">
+                        <Play size={20} fill="white" style={{ marginLeft: '2px' }} />
+                      </div>
+                    </div>
+
+                    <div className="badge-row-top">
+                      <span className={`action-badge ${isAlert ? 'alerted' : 'saved'}`}>
+                        {isAlert ? <ShieldAlert size={12} style={{ marginRight: '4px' }} /> : null}
+                        {clip.action || 'SAVED'}
+                      </span>
+                    </div>
+
+                    <div className="badge-row-bottom">
+                      <span className="duration-pill">
+                        {clip.duration_sec ? `${clip.duration_sec.toFixed(1)}s` : '5.0s'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="clip-meta-content">
+                    <div className="clip-time-row">
+                      <div className="clip-timestamp">
+                        <Clock size={13} />
+                        <span>{formatTimestamp(clip.timestamp)}</span>
+                      </div>
+                      <span className="clip-id-tag">#{clip.clip_id}</span>
+                    </div>
+
+                    {clip.distance !== undefined && (
+                      <div className="distance-indicator">
+                        <div className="distance-bar-wrapper">
+                          <div 
+                            className="distance-bar-fill" 
+                            style={{ width: `${Math.max(5, Math.min(100, (2 - clip.distance) * 50))}%` }}
+                          />
+                        </div>
+                        <span className="distance-score">
+                          {((2 - clip.distance) / 2).toFixed(2)} match
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+
+          {/* Empty State */}
+          {!loading && filteredClips.length === 0 && (
+            <div className="empty-state glass-card">
+              <div className="empty-icon">
+                <Video size={32} />
+              </div>
+              <h3 className="empty-title">No Video Clips Found</h3>
+              <p className="empty-desc">
+                {isSearchResult 
+                  ? "No clips closely match your query. Try broadening your terms or clear search."
+                  : "No events recorded yet. CheckCam records clips automatically when motion is detected."}
+              </p>
+              {isSearchResult && (
+                <button 
+                  className="btn-primary"
+                  onClick={() => {
+                    setQuery('');
+                    fetchRecentClips();
+                  }}
+                  style={{ marginTop: '12px' }}
+                >
+                  Show All Recent Clips
+                </button>
+              )}
+            </div>
+          )}
+        </main>
+      )}
+
+      {/* ===================== TAB 2: SETTINGS & RULES ===================== */}
+      {activeTab === 'settings' && (
+        <main className="settings-container fade-in">
+          <div className="settings-grid">
+
+            {/* SECTION 1: Zero-Shot Classification Rules (Full Width) */}
+            <div className="settings-card glass-card full-width">
+              <div className="settings-card-header">
+                <div>
+                  <div className="settings-card-title">
+                    <Sliders size={20} color="var(--accent-cyan)" />
+                    <span>Zero-Shot AI Classification Rules</span>
+                  </div>
+                  <p className="settings-card-desc">
+                    Clips are classified against these prompts using SigLIP INT8 zero-shot inference. Events automatically route to Discard, Save, or Telegram Alert.
+                  </p>
+                </div>
+                <button 
+                  className="btn-secondary"
+                  onClick={handleReloadRules}
+                  disabled={rulesReloading}
+                  title="Re-encode all rule prompts into in-memory vectors"
+                >
+                  <RefreshCw size={14} className={rulesReloading ? 'spinner' : ''} />
+                  <span>{rulesReloading ? 'Re-encoding...' : 'Reload In-Memory'}</span>
+                </button>
+              </div>
+
+              {/* Rules List */}
+              <div className="rules-list-grid">
+                {rules.map((rule) => {
+                  const isAlert = rule.action_name === 'alert';
+                  const isDiscard = rule.action_name === 'discard';
+                  return (
+                    <div key={rule.id} className="rule-card-item">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <span className={`action-badge ${isAlert ? 'alerted' : isDiscard ? 'discarded' : 'saved'}`} style={{ fontSize: '0.68rem' }}>
+                          {rule.action_name.toUpperCase()}
+                        </span>
+                        <span style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>
+                          "{rule.description}"
+                        </span>
+                      </div>
+                      <button 
+                        onClick={() => handleDeleteRule(rule.id)}
+                        style={{ color: '#ef4444', padding: '4px', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                        title="Delete rule"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Add Rule Form */}
+              <form onSubmit={handleAddRule} className="add-rule-box">
+                <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  Add Classification Rule
+                </span>
+                <div className="add-rule-form-row">
+                  <input
+                    type="text"
+                    className="setting-input"
+                    placeholder="Enter visual prompt (e.g. 'a person holding a package', 'a cat on the sofa')"
+                    value={newRuleDesc}
+                    onChange={(e) => setNewRuleDesc(e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <select
+                    className="setting-select"
+                    value={newRuleActionId}
+                    onChange={(e) => setNewRuleActionId(e.target.value)}
+                    style={{ width: '140px' }}
+                  >
+                    {actions.map((act) => (
+                      <option key={act.id} value={act.id}>
+                        {act.command}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="submit" className="btn-primary" style={{ padding: '10px 18px' }}>
+                    <Plus size={16} />
+                    <span>Add</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* SECTION 2: Camera Hardware */}
+            <div className="settings-card glass-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <Camera size={19} color="var(--accent-cyan)" />
+                  <span>Camera Hardware</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Device Source</span>
+                  <span className="setting-val-badge">{String(settings.camera.source)}</span>
+                </div>
+                <input 
+                  type="text"
+                  className="setting-input"
+                  value={settings.camera.source}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    const parsed = /^\d+$/.test(val) ? parseInt(val, 10) : val;
+                    setSettings({ ...settings, camera: { ...settings.camera, source: parsed } });
+                  }}
+                  placeholder="0, 'picam', or rtsp://..."
+                />
+                <span className="setting-hint">
+                  Use <code>0</code> or <code>1</code> for USB webcam, <code>picam</code> for Raspberry Pi Camera Module, or an RTSP stream URL.
+                </span>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Capture Framerate</span>
+                  <span className="setting-val-badge">{settings.camera.fps} FPS</span>
+                </div>
+                <input 
+                  type="range"
+                  min="5"
+                  max="30"
+                  step="1"
+                  className="setting-range"
+                  value={settings.camera.fps}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    camera: { ...settings.camera, fps: parseInt(e.target.value, 10) }
+                  })}
+                />
+                <span className="setting-hint">Lower FPS (15) reduces CPU and heat on Raspberry Pi 4.</span>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Resolution</span>
+                  <span className="setting-val-badge">
+                    {settings.camera.resolution ? `${settings.camera.resolution[0]}x${settings.camera.resolution[1]}` : '640x480'}
+                  </span>
+                </div>
+                <select 
+                  className="setting-select"
+                  value={`${settings.camera.resolution[0]}x${settings.camera.resolution[1]}`}
+                  onChange={(e) => {
+                    const parts = e.target.value.split('x').map(Number);
+                    setSettings({ ...settings, camera: { ...settings.camera, resolution: parts } });
+                  }}
+                >
+                  <option value="640x480">640x480 (SD — Recommended for Pi 4)</option>
+                  <option value="1280x720">1280x720 (HD 720p)</option>
+                  <option value="1920x1080">1920x1080 (Full HD 1080p)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* SECTION 3: Motion & Clip Recording */}
+            <div className="settings-card glass-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <Film size={19} color="var(--accent-emerald)" />
+                  <span>Motion & Clip Recording</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Clip Duration</span>
+                  <span className="setting-val-badge">{settings.recording.clip_duration_sec}s (Max 10s)</span>
+                </div>
+                <input 
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  className="setting-range"
+                  value={settings.recording.clip_duration_sec}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    recording: { ...settings.recording, clip_duration_sec: Math.min(10, Math.max(1, parseInt(e.target.value, 10))) }
+                  })}
+                />
+                <span className="setting-hint">Duration of each event recording. Strictly capped at 10 seconds.</span>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Motion Pixel Threshold</span>
+                  <span className="setting-val-badge">{settings.recording.motion_threshold}</span>
+                </div>
+                <input 
+                  type="range"
+                  min="5"
+                  max="80"
+                  step="1"
+                  className="setting-range"
+                  value={settings.recording.motion_threshold}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    recording: { ...settings.recording, motion_threshold: parseInt(e.target.value, 10) }
+                  })}
+                />
+                <span className="setting-hint">Intensity delta (0-255) to trigger motion differencing. Default 25.</span>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Min Motion Area %</span>
+                  <span className="setting-val-badge">{settings.recording.min_motion_area_pct}%</span>
+                </div>
+                <input 
+                  type="range"
+                  min="0.2"
+                  max="10.0"
+                  step="0.1"
+                  className="setting-range"
+                  value={settings.recording.min_motion_area_pct}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    recording: { ...settings.recording, min_motion_area_pct: parseFloat(e.target.value) }
+                  })}
+                />
+                <span className="setting-hint">Min percentage of total frame area that must change to start recording.</span>
+              </div>
+            </div>
+
+            {/* SECTION 4: AI Inference & Sampling */}
+            <div className="settings-card glass-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <Cpu size={19} color="var(--accent-purple)" />
+                  <span>AI Inference & Thresholds</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Keyframes Sampled Per Clip</span>
+                  <span className="setting-val-badge">{settings.model.keyframes_per_clip} Frames</span>
+                </div>
+                <input 
+                  type="range"
+                  min="1"
+                  max="7"
+                  step="1"
+                  className="setting-range"
+                  value={settings.model.keyframes_per_clip}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    model: { ...settings.model, keyframes_per_clip: parseInt(e.target.value, 10) }
+                  })}
+                />
+                <span className="setting-hint">Uniformly sampled keyframes fed into SigLIP vision model. 3 is optimal.</span>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Rule Confidence Threshold</span>
+                  <span className="setting-val-badge">{settings.rules.confidence_threshold.toFixed(2)}</span>
+                </div>
+                <input 
+                  type="range"
+                  min="0.01"
+                  max="0.30"
+                  step="0.01"
+                  className="setting-range"
+                  value={settings.rules.confidence_threshold}
+                  onChange={(e) => setSettings({
+                    ...settings, 
+                    rules: { ...settings.rules, confidence_threshold: parseFloat(e.target.value) }
+                  })}
+                />
+                <span className="setting-hint">Below this cosine similarity score, clips are automatically DISCARDED.</span>
+              </div>
+            </div>
+
+            {/* SECTION 5: Storage Directory */}
+            <div className="settings-card glass-card">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <HardDrive size={19} color="var(--accent-cyan)" />
+                  <span>Storage Location</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label-row">
+                  <span className="setting-label">Video Clips Directory</span>
+                  <span className="setting-val-badge">{settings.storage.clip_dir}</span>
+                </div>
+                <input 
+                  type="text"
+                  className="setting-input"
+                  value={settings.storage.clip_dir}
+                  onChange={(e) => setSettings({
+                    ...settings,
+                    storage: { ...settings.storage, clip_dir: e.target.value }
+                  })}
+                  placeholder="./data/clips"
+                />
+                <span className="setting-hint">Local filesystem directory where recorded MP4 video clips are stored.</span>
+              </div>
+            </div>
+
+            {/* SECTION 6: Telegram Notifications (Full Width) */}
+            <div className="settings-card glass-card full-width">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <Bell size={19} color="var(--accent-rose)" />
+                  <span>Telegram Alert Notifications</span>
+                </div>
+
+                <div className="toggle-wrapper" style={{ gap: '12px' }}>
+                  <span style={{ fontSize: '0.85rem', color: settings.telegram.enabled ? 'var(--accent-emerald)' : 'var(--text-muted)' }}>
+                    {settings.telegram.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                  <label className="switch">
+                    <input 
+                      type="checkbox"
+                      checked={settings.telegram.enabled}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        telegram: { ...settings.telegram, enabled: e.target.checked }
+                      })}
+                    />
+                    <span className="slider-toggle"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                <div className="setting-row">
+                  <span className="setting-label">Bot Token</span>
+                  <input 
+                    type="password"
+                    className="setting-input"
+                    value={settings.telegram.bot_token}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      telegram: { ...settings.telegram, bot_token: e.target.value }
+                    })}
+                    placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+                  />
+                  <span className="setting-hint">Token obtained from @BotFather.</span>
+                </div>
+
+                <div className="setting-row">
+                  <span className="setting-label">Chat ID</span>
+                  <input 
+                    type="text"
+                    className="setting-input"
+                    value={settings.telegram.chat_id}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      telegram: { ...settings.telegram, chat_id: e.target.value }
+                    })}
+                    placeholder="e.g. 987654321"
+                  />
+                  <span className="setting-hint">Your Telegram user ID or alert group ID.</span>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '16px', paddingTop: '8px' }}>
+                <button 
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleTestTelegram}
+                  disabled={telegramTesting || !settings.telegram.bot_token || !settings.telegram.chat_id}
+                >
+                  <Send size={14} className={telegramTesting ? 'spinner' : ''} />
+                  <span>{telegramTesting ? 'Sending test...' : 'Send Test Notification'}</span>
+                </button>
+
+                {telegramResult && (
+                  <span style={{ 
+                    fontSize: '0.85rem', 
+                    color: telegramResult.success ? 'var(--accent-emerald)' : 'var(--accent-rose)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}>
+                    {telegramResult.success ? <Check size={16} /> : <AlertTriangle size={16} />}
+                    {telegramResult.message}
+                  </span>
+                )}
+              </div>
+            </div>
+
           </div>
 
-          <div className="search-controls">
-            <select 
-              className="limit-select"
-              value={limit}
-              onChange={(e) => setLimit(e.target.value)}
-            >
-              <option value="6">Top 6</option>
-              <option value="12">Top 12</option>
-              <option value="24">Top 24</option>
-              <option value="48">Top 48</option>
-            </select>
+          {/* Sticky Floating Save Bar */}
+          <div className="save-bar">
+            <div className="save-bar-info">
+              <span>Settings are kept in SQLite and applied live to all processes.</span>
+              {saveSuccess && (
+                <div className="save-feedback-badge">
+                  <Check size={16} />
+                  <span>Settings Saved Successfully!</span>
+                </div>
+              )}
+            </div>
 
             <button 
               className="btn-primary"
-              onClick={() => handleSearch()}
-              disabled={loading}
+              onClick={handleSaveSettings}
+              disabled={settingsSaving}
+              style={{ minWidth: '150px', padding: '10px 22px' }}
             >
-              <Search size={18} className={loading ? 'spinner' : ''} />
-              <span>{loading ? 'Searching...' : 'Search Clips'}</span>
+              <Save size={16} className={settingsSaving ? 'spinner' : ''} />
+              <span>{settingsSaving ? 'Saving...' : 'Save Settings'}</span>
             </button>
           </div>
-        </div>
-      </section>
-
-      {/* Results Header */}
-      <div className="results-header-bar">
-        <div className="results-title-group">
-          <h2 className="results-heading">
-            {isSearchResult ? `Results for "${lastQuery}"` : 'Recent Camera Events'}
-          </h2>
-          <span className="results-count">
-            {filteredClips.length} {filteredClips.length === 1 ? 'clip' : 'clips'}
-          </span>
-        </div>
-
-        <div className="filter-tabs">
-          <button 
-            className={`tab-btn ${activeFilter === 'ALL' ? 'active' : ''}`}
-            onClick={() => setActiveFilter('ALL')}
-          >
-            All ({clips.length})
-          </button>
-          <button 
-            className={`tab-btn ${activeFilter === 'ALERT' ? 'active' : ''}`}
-            onClick={() => setActiveFilter('ALERT')}
-          >
-            Alerts ({clips.filter(c => c.action === 'ALERTED').length})
-          </button>
-          <button 
-            className={`tab-btn ${activeFilter === 'SAVE' ? 'active' : ''}`}
-            onClick={() => setActiveFilter('SAVE')}
-          >
-            Saved ({clips.filter(c => c.action === 'SAVED').length})
-          </button>
-        </div>
-      </div>
-
-      {/* Grid of Clips */}
-      {filteredClips.length === 0 ? (
-        <div className="empty-state glass-card fade-in">
-          <div className="empty-icon">
-            <Video size={32} />
-          </div>
-          <h3 className="empty-title">
-            {loading ? 'Analyzing multimodal embeddings...' : 'No matching clips found'}
-          </h3>
-          <p className="empty-desc">
-            {isSearchResult 
-              ? 'Try adjusting your search query, selecting different words, or browsing recent events.'
-              : 'Move in front of the camera to trigger recording, or verify your camera daemon is running.'}
-          </p>
-        </div>
-      ) : (
-        <div className="clips-grid">
-          {filteredClips.map((clip) => (
-            <div 
-              key={clip.clip_id} 
-              className="clip-card glass-card fade-in"
-              onClick={() => setSelectedClip(clip)}
-            >
-              <div className="thumbnail-container">
-                {clip.thumbnail_url ? (
-                  <img 
-                    src={clip.thumbnail_url} 
-                    alt={`Clip ${clip.clip_id}`}
-                    className="clip-thumbnail"
-                    loading="lazy"
-                    onError={(e) => {
-                      e.target.style.display = 'none';
-                      e.target.nextSibling.style.display = 'flex';
-                    }}
-                  />
-                ) : null}
-                <div 
-                  className="thumbnail-fallback"
-                  style={{ display: clip.thumbnail_url ? 'none' : 'flex' }}
-                >
-                  <Video size={28} />
-                  <span>Clip #{clip.clip_id}</span>
-                </div>
-
-                <div className="thumbnail-overlay">
-                  <div className="play-circle">
-                    <Play size={24} fill="#051026" />
-                  </div>
-                </div>
-
-                <div className="badge-top-left">
-                  <span className={`action-badge ${clip.action === 'ALERTED' ? 'alerted' : 'saved'}`}>
-                    {clip.action === 'ALERTED' ? <ShieldAlert size={12} /> : null}
-                    {clip.action || 'SAVED'}
-                  </span>
-                </div>
-
-                {clip.distance !== undefined && (
-                  <div className="similarity-badge">
-                    {Math.max(0, Math.min(100, Math.round((2 - clip.distance) * 50)))}% match
-                  </div>
-                )}
-
-                <div className="duration-tag">
-                  {clip.duration_sec ? `${clip.duration_sec.toFixed(1)}s` : '5.0s'}
-                </div>
-              </div>
-
-              <div className="clip-info">
-                <div className="clip-title-row">
-                  <span className="clip-id">Clip #{clip.clip_id}</span>
-                </div>
-                <div className="clip-timestamp">
-                  <Clock size={13} />
-                  <span>{formatTimestamp(clip.timestamp)}</span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+        </main>
       )}
 
-      {/* Video Modal Player */}
+      {/* Video Player Modal */}
       {selectedClip && (
         <div className="modal-overlay" onClick={() => setSelectedClip(null)}>
           <div className="modal-content glass-card fade-in" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span className={`action-badge ${selectedClip.action === 'ALERTED' ? 'alerted' : 'saved'}`}>
-                  {selectedClip.action}
+                  {selectedClip.action || 'SAVED'}
                 </span>
                 <h3 className="modal-title">Clip #{selectedClip.clip_id}</h3>
               </div>
@@ -474,93 +1042,6 @@ export default function App() {
                 <Download size={15} />
                 <span>Download MP4</span>
               </a>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Rules Manager Modal */}
-      {rulesModalOpen && (
-        <div className="modal-overlay" onClick={() => setRulesModalOpen(false)}>
-          <div className="modal-content glass-card fade-in" style={{ maxWidth: '640px' }} onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="modal-title">Zero-Shot Classification Rules</h3>
-              <button className="modal-close-btn" onClick={() => setRulesModalOpen(false)}>
-                <X size={20} />
-              </button>
-            </div>
-
-            <div style={{ padding: '20px', maxHeight: '420px', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
-                {rules.map((rule) => (
-                  <div 
-                    key={rule.id}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: '10px 14px',
-                      background: 'rgba(255, 255, 255, 0.03)',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-subtle)'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                      <span className={`action-badge ${rule.action_name === 'alert' ? 'alerted' : 'saved'}`} style={{ fontSize: '0.68rem' }}>
-                        {rule.action_name}
-                      </span>
-                      <span style={{ fontSize: '0.9rem' }}>"{rule.description}"</span>
-                    </div>
-                    <button 
-                      onClick={() => handleDeleteRule(rule.id)}
-                      style={{ color: '#ef4444', padding: '4px' }}
-                      title="Delete rule"
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              {/* Add Rule Form */}
-              <form onSubmit={handleAddRule} style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '16px' }}>
-                <h4 style={{ fontSize: '0.85rem', marginBottom: '10px', color: 'var(--text-secondary)' }}>Add New Classification Rule</h4>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                  <input
-                    type="text"
-                    placeholder="Rule prompt (e.g. 'person on bicycle')"
-                    value={newRuleDesc}
-                    onChange={(e) => setNewRuleDesc(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: '10px 14px',
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: '8px',
-                      fontSize: '0.85rem'
-                    }}
-                  />
-                  <select
-                    value={newRuleActionId}
-                    onChange={(e) => setNewRuleActionId(parseInt(e.target.value, 10))}
-                    style={{
-                      padding: '10px 12px',
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: '8px',
-                      color: 'var(--text-secondary)',
-                      fontSize: '0.85rem'
-                    }}
-                  >
-                    {actions.map(a => (
-                      <option key={a.id} value={a.id}>{a.name.toUpperCase()}</option>
-                    ))}
-                  </select>
-                  <button type="submit" className="btn-primary" style={{ padding: '10px 18px', fontSize: '0.85rem' }}>
-                    Add
-                  </button>
-                </div>
-              </form>
             </div>
           </div>
         </div>

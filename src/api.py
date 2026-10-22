@@ -316,6 +316,52 @@ async def reload_rules():
     return {"status": "reloaded", "rule_count": len(db.get_rules())}
 
 
+# --- Dynamic Settings Endpoints ---
+
+@app.get("/api/settings")
+async def get_settings():
+    """Fetch current dynamic settings stored in SQLite."""
+    return db.get_settings()
+
+
+@app.post("/api/settings")
+async def update_settings(payload: dict):
+    """
+    Update dynamic settings in SQLite and apply runtime updates to workers.
+    Enforces clip_duration_sec max 10.
+    """
+    updated = db.update_settings(payload)
+    if processor_worker:
+        processor_worker.update_dynamic_settings(updated)
+    return {
+        "status": "updated",
+        "settings": updated
+    }
+
+
+class TestTelegramRequest(BaseModel):
+    bot_token: str
+    chat_id: str
+
+
+@app.post("/api/telegram/test")
+async def test_telegram_connection(req: TestTelegramRequest):
+    """Send a test message to verify Telegram bot credentials."""
+    if not req.bot_token.strip() or not req.chat_id.strip():
+        raise HTTPException(status_code=400, detail="Bot token and chat ID are required")
+    try:
+        from telegram import Bot
+        bot = Bot(token=req.bot_token.strip())
+        await bot.send_message(
+            chat_id=req.chat_id.strip(),
+            text="🔔 *CheckCam Test Alert*\n\nYour Telegram alert connection is verified and functioning properly!",
+            parse_mode="Markdown"
+        )
+        return {"status": "ok", "message": "Test alert sent successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Telegram test failed: {str(e)}")
+
+
 # --- Static Mounts ---
 Path("data/thumbnails").mkdir(parents=True, exist_ok=True)
 app.mount("/thumbnails", StaticFiles(directory="data/thumbnails"), name="thumbnails")

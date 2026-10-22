@@ -69,8 +69,8 @@ class AppConfig:
     log_level: str
 
 
-def load_config(path: str = "config.yaml") -> AppConfig:
-    """Load and validate config.yaml into typed dataclass."""
+def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
+    """Load config.yaml with dynamic setting overrides from SQLite database."""
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -78,13 +78,48 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
+    db_path = raw["storage"]["database_path"]
+    embedding_dim = raw["model"]["embedding_dim"]
+
+    # Base configs from YAML
+    camera_data = dict(raw["camera"])
+    recording_data = dict(raw["recording"])
+    storage_data = dict(raw["storage"])
+    model_data = dict(raw["model"])
+    rules_data = dict(raw.get("rules", {}))
+    telegram_data = dict(raw.get("telegram", {}))
+
+    # Overlay from SQLite if database exists and use_db is True
+    if use_db and Path(db_path).exists():
+        try:
+            from src.database import Database
+            db = Database(db_path, embedding_dim)
+            db.connect()
+            db_settings = db.get_settings()
+            db.close()
+
+            if "camera" in db_settings:
+                camera_data.update(db_settings["camera"])
+            if "recording" in db_settings:
+                recording_data.update(db_settings["recording"])
+            if "storage" in db_settings and "clip_dir" in db_settings["storage"]:
+                storage_data["clip_dir"] = db_settings["storage"]["clip_dir"]
+            if "model" in db_settings and "keyframes_per_clip" in db_settings["model"]:
+                model_data["keyframes_per_clip"] = db_settings["model"]["keyframes_per_clip"]
+            if "rules" in db_settings and "confidence_threshold" in db_settings["rules"]:
+                rules_data["confidence_threshold"] = db_settings["rules"]["confidence_threshold"]
+            if "telegram" in db_settings:
+                telegram_data.update(db_settings["telegram"])
+        except Exception:
+            pass
+
     return AppConfig(
-        camera=CameraConfig(**raw["camera"]),
-        recording=RecordingConfig(**raw["recording"]),
-        storage=StorageConfig(**raw["storage"]),
-        model=ModelConfig(**raw["model"]),
-        rules=RulesConfig(**raw["rules"]),
-        telegram=TelegramConfig(**raw["telegram"]),
+        camera=CameraConfig(**camera_data),
+        recording=RecordingConfig(**recording_data),
+        storage=StorageConfig(**storage_data),
+        model=ModelConfig(**model_data),
+        rules=RulesConfig(**rules_data),
+        telegram=TelegramConfig(**telegram_data),
         zmq_ipc_path=raw["zmq"]["ipc_path"],
         zmq_transcode_ipc_path=raw["zmq"].get(
             "transcode_ipc_path", "ipc:///tmp/checkcam_transcode.sock"

@@ -77,6 +77,12 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_rules_action_id
                 ON rules(action_id);
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
         """)
 
         # vec0 virtual table — rowid links to clips.id
@@ -86,8 +92,9 @@ class Database:
         """)
         self.conn.commit()
 
-        # Seed initial actions and rules if empty
+        # Seed initial actions, rules, and settings
         self._seed_default_rules()
+        self._seed_default_settings()
 
     def _seed_default_rules(self):
         """Seed default actions and initial rules if tables are empty."""
@@ -131,6 +138,62 @@ class Database:
             )
             self.conn.commit()
             logger.info("default_rules_seeded", count=len(default_rules))
+
+    def _seed_default_settings(self):
+        """Seed initial dynamic settings from config.yaml or defaults if missing."""
+        defaults = {
+            "camera.source": "0",
+            "camera.fps": "15",
+            "camera.resolution": "640x480",
+            "recording.clip_duration_sec": "5",
+            "recording.motion_threshold": "25",
+            "recording.min_motion_area_pct": "1.5",
+            "storage.clip_dir": "./data/clips",
+            "model.keyframes_per_clip": "3",
+            "rules.confidence_threshold": "0.05",
+            "telegram.enabled": "false",
+            "telegram.bot_token": "",
+            "telegram.chat_id": "",
+        }
+
+        # Seed from config.yaml if available
+        try:
+            import yaml
+            from pathlib import Path
+            cfg_p = Path("config.yaml")
+            if cfg_p.exists():
+                with open(cfg_p) as f:
+                    raw = yaml.safe_load(f)
+                if isinstance(raw, dict):
+                    if "camera" in raw and isinstance(raw["camera"], dict):
+                        defaults["camera.source"] = str(raw["camera"].get("source", 0))
+                        defaults["camera.fps"] = str(raw["camera"].get("fps", 15))
+                        res = raw["camera"].get("resolution", [640, 480])
+                        if isinstance(res, (list, tuple)) and len(res) == 2:
+                            defaults["camera.resolution"] = f"{res[0]}x{res[1]}"
+                    if "recording" in raw and isinstance(raw["recording"], dict):
+                        dur = min(int(raw["recording"].get("clip_duration_sec", 5)), 10)
+                        defaults["recording.clip_duration_sec"] = str(dur)
+                        defaults["recording.motion_threshold"] = str(raw["recording"].get("motion_threshold", 25))
+                        defaults["recording.min_motion_area_pct"] = str(raw["recording"].get("min_motion_area_pct", 1.5))
+                    if "storage" in raw and isinstance(raw["storage"], dict):
+                        defaults["storage.clip_dir"] = str(raw["storage"].get("clip_dir", "./data/clips"))
+                    if "model" in raw and isinstance(raw["model"], dict):
+                        defaults["model.keyframes_per_clip"] = str(raw["model"].get("keyframes_per_clip", 3))
+                    if "rules" in raw and isinstance(raw["rules"], dict):
+                        defaults["rules.confidence_threshold"] = str(raw["rules"].get("confidence_threshold", 0.05))
+                    if "telegram" in raw and isinstance(raw["telegram"], dict):
+                        defaults["telegram.enabled"] = "true" if raw["telegram"].get("enabled", False) else "false"
+                        defaults["telegram.bot_token"] = str(raw["telegram"].get("bot_token", ""))
+                        defaults["telegram.chat_id"] = str(raw["telegram"].get("chat_id", ""))
+        except Exception as e:
+            logger.debug("seed_settings_yaml_read_error", error=str(e))
+
+        for k, v in defaults.items():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v)
+            )
+        self.conn.commit()
 
     # ── Clip CRUD ─────────────────────────────────────────────────────
 
@@ -272,6 +335,125 @@ class Database:
         )
         self.conn.commit()
         return cursor.rowcount > 0
+
+    # ── Settings CRUD ─────────────────────────────────────────────────
+
+    def get_settings(self) -> dict:
+        """Fetch all dynamic settings from SQLite, formatted as nested dictionaries with types."""
+        rows = self.conn.execute("SELECT key, value FROM settings").fetchall()
+        raw = {r["key"]: r["value"] for r in rows}
+
+        # Camera source
+        cam_source_raw = raw.get("camera.source", "0")
+        cam_source = int(cam_source_raw) if cam_source_raw.isdigit() else cam_source_raw
+
+        # Resolution
+        res_raw = raw.get("camera.resolution", "640x480")
+        try:
+            res_parts = [int(p.strip()) for p in res_raw.lower().split("x")]
+            resolution = res_parts if len(res_parts) == 2 else [640, 480]
+        except Exception:
+            resolution = [640, 480]
+
+        return {
+            "camera": {
+                "source": cam_source,
+                "fps": int(raw.get("camera.fps", 15)),
+                "resolution": resolution,
+            },
+            "recording": {
+                "clip_duration_sec": min(int(raw.get("recording.clip_duration_sec", 5)), 10),
+                "motion_threshold": int(raw.get("recording.motion_threshold", 25)),
+                "min_motion_area_pct": float(raw.get("recording.min_motion_area_pct", 1.5)),
+            },
+            "storage": {
+                "clip_dir": raw.get("storage.clip_dir", "./data/clips"),
+            },
+            "model": {
+                "keyframes_per_clip": int(raw.get("model.keyframes_per_clip", 3)),
+            },
+            "rules": {
+                "confidence_threshold": float(raw.get("rules.confidence_threshold", 0.05)),
+            },
+            "telegram": {
+                "enabled": raw.get("telegram.enabled", "false").lower() in ("true", "1", "yes"),
+                "bot_token": raw.get("telegram.bot_token", ""),
+                "chat_id": raw.get("telegram.chat_id", ""),
+            },
+        }
+
+    def update_settings(self, updates: dict) -> dict:
+        """
+        Validate and update settings in SQLite.
+        Enforces clip_duration_sec max 10.
+        Returns the full updated settings dictionary.
+        """
+        kvs: dict[str, str] = {}
+
+        if "camera" in updates and isinstance(updates["camera"], dict):
+            cam = updates["camera"]
+            if "source" in cam:
+                kvs["camera.source"] = str(cam["source"]).strip()
+            if "fps" in cam:
+                fps = max(1, min(int(cam["fps"]), 60))
+                kvs["camera.fps"] = str(fps)
+            if "resolution" in cam:
+                res = cam["resolution"]
+                if isinstance(res, (list, tuple)) and len(res) == 2:
+                    kvs["camera.resolution"] = f"{int(res[0])}x{int(res[1])}"
+                elif isinstance(res, str) and "x" in res:
+                    kvs["camera.resolution"] = res.strip().lower()
+
+        if "recording" in updates and isinstance(updates["recording"], dict):
+            rec = updates["recording"]
+            if "clip_duration_sec" in rec:
+                # Strictly enforce max 10 as requested
+                duration = max(1, min(int(rec["clip_duration_sec"]), 10))
+                kvs["recording.clip_duration_sec"] = str(duration)
+            if "motion_threshold" in rec:
+                thresh = max(1, min(int(rec["motion_threshold"]), 255))
+                kvs["recording.motion_threshold"] = str(thresh)
+            if "min_motion_area_pct" in rec:
+                pct = max(0.01, min(float(rec["min_motion_area_pct"]), 100.0))
+                kvs["recording.min_motion_area_pct"] = str(round(pct, 2))
+
+        if "storage" in updates and isinstance(updates["storage"], dict):
+            st = updates["storage"]
+            if "clip_dir" in st:
+                kvs["storage.clip_dir"] = str(st["clip_dir"]).strip()
+
+        if "model" in updates and isinstance(updates["model"], dict):
+            md = updates["model"]
+            if "keyframes_per_clip" in md:
+                kf = max(1, min(int(md["keyframes_per_clip"]), 10))
+                kvs["model.keyframes_per_clip"] = str(kf)
+
+        if "rules" in updates and isinstance(updates["rules"], dict):
+            rl = updates["rules"]
+            if "confidence_threshold" in rl:
+                ct = max(0.0, min(float(rl["confidence_threshold"]), 1.0))
+                kvs["rules.confidence_threshold"] = str(round(ct, 3))
+
+        if "telegram" in updates and isinstance(updates["telegram"], dict):
+            tg = updates["telegram"]
+            if "enabled" in tg:
+                kvs["telegram.enabled"] = "true" if tg["enabled"] else "false"
+            if "bot_token" in tg:
+                kvs["telegram.bot_token"] = str(tg["bot_token"]).strip()
+            if "chat_id" in tg:
+                kvs["telegram.chat_id"] = str(tg["chat_id"]).strip()
+
+        if kvs:
+            self.conn.executemany(
+                """INSERT INTO settings (key, value, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+                list(kvs.items())
+            )
+            self.conn.commit()
+            logger.info("settings_updated_in_db", keys=list(kvs.keys()))
+
+        return self.get_settings()
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
