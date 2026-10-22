@@ -27,6 +27,33 @@ _ENCODER_CANDIDATES = [
 ]
 
 
+def _get_installed_h264_encoders() -> list[str]:
+    """Parse ffmpeg -encoders and return available H.264 video encoders in priority order."""
+    if not shutil.which("ffmpeg"):
+        logger.error("ffmpeg_not_found_on_system")
+        return []
+
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True
+        )
+        installed = set()
+        for line in res.stdout.splitlines():
+            parts = line.strip().split()
+            # Format: 'V..... encoder_name description'
+            if len(parts) >= 2 and parts[0].startswith("V"):
+                installed.add(parts[1])
+
+        return [enc for enc in _ENCODER_CANDIDATES if enc in installed]
+    except Exception as e:
+        logger.error("failed_to_probe_ffmpeg_encoders", error=str(e))
+        return []
+
+
 def detect_h264_encoder() -> str:
     """
     Probe ffmpeg for the optimal working H.264 encoder on this hardware.
@@ -36,44 +63,39 @@ def detect_h264_encoder() -> str:
     if _CACHED_ENCODER is not None:
         return _CACHED_ENCODER
 
-    if not shutil.which("ffmpeg"):
-        logger.error("ffmpeg_not_found_on_system")
-        _CACHED_ENCODER = "libopenh264"
+    available = _get_installed_h264_encoders()
+    if not available:
+        logger.warning("no_h264_encoders_found_falling_back_to_libx264")
+        _CACHED_ENCODER = "libx264"
         return _CACHED_ENCODER
 
-    try:
-        res = subprocess.run(
-            ["ffmpeg", "-encoders"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        encoders_output = res.stdout
-    except Exception as e:
-        logger.error("failed_to_probe_ffmpeg_encoders", error=str(e))
-        _CACHED_ENCODER = "libopenh264"
-        return _CACHED_ENCODER
+    # Test candidate encoders to see which one works on this system
+    for enc in available:
+        test_cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+            "-c:v", enc,
+        ]
+        if enc == "libx264":
+            test_cmd.extend(["-preset", "ultrafast"])
+        test_cmd.extend(["-f", "null", "-"])
 
-    for enc in _ENCODER_CANDIDATES:
-        if enc in encoders_output:
-            # Test if the encoder actually initializes and runs
-            test_cmd = [
-                "ffmpeg", "-y",
-                "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
-                "-c:v", enc,
-                "-f", "null", "-"
-            ]
-            try:
-                test_res = subprocess.run(test_cmd, capture_output=True, timeout=3)
-                if test_res.returncode == 0:
-                    logger.info("h264_encoder_detected", encoder=enc)
-                    _CACHED_ENCODER = enc
-                    return enc
-            except Exception:
-                continue
+        try:
+            test_res = subprocess.run(test_cmd, capture_output=True, timeout=8)
+            if test_res.returncode == 0:
+                logger.info("h264_encoder_detected", encoder=enc)
+                _CACHED_ENCODER = enc
+                return enc
+            else:
+                logger.debug("encoder_candidate_test_failed", encoder=enc, stderr=test_res.stderr.decode(errors="ignore")[:200])
+        except Exception as e:
+            logger.debug("encoder_candidate_probe_exception", encoder=enc, error=str(e))
+            continue
 
-    logger.warning("no_specialized_encoder_verified_fallback_to_libopenh264")
-    _CACHED_ENCODER = "libopenh264"
+    # If verification probe timed out, fall back to the first actually installed encoder
+    fallback = available[0]
+    logger.warning("using_installed_encoder_fallback", encoder=fallback, available=available)
+    _CACHED_ENCODER = fallback
     return _CACHED_ENCODER
 
 
@@ -98,38 +120,51 @@ def transcode_to_h264(
 
     target_p = Path(output_path) if output_path else src_p.with_suffix(".tmp.mp4")
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(src_p),
-        "-c:v", encoder,
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        "-an",
-        str(target_p),
-    ]
+    # Try selected encoder, with fallback to any other available installed encoders
+    available = _get_installed_h264_encoders()
+    encoders_to_try = [encoder] + [e for e in available if e != encoder]
 
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if res.returncode != 0:
-            logger.error("ffmpeg_transcode_failed", error=res.stderr, path=input_path)
+    for current_enc in encoders_to_try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src_p),
+            "-c:v", current_enc,
+        ]
+        if current_enc == "libx264":
+            cmd.extend(["-preset", "ultrafast"])
+
+        cmd.extend([
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",
+            str(target_p),
+        ])
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if res.returncode == 0:
+                if output_path is None:
+                    target_p.replace(src_p)
+                    logger.info("clip_transcoded_to_h264", path=input_path, encoder=current_enc)
+                else:
+                    logger.info("clip_transcoded_to_h264", path=str(target_p), encoder=current_enc)
+                return True
+            else:
+                logger.warning(
+                    "ffmpeg_encoder_failed_trying_next",
+                    encoder=current_enc,
+                    error=res.stderr[-200:] if res.stderr else "unknown",
+                    path=input_path
+                )
+                if target_p.exists():
+                    target_p.unlink()
+        except Exception as e:
+            logger.error("transcode_exception", encoder=current_enc, error=str(e), path=input_path)
             if target_p.exists():
                 target_p.unlink()
-            return False
 
-        if output_path is None:
-            # Atomic replace on same filesystem
-            target_p.replace(src_p)
-            logger.info("clip_transcoded_to_h264", path=input_path, encoder=encoder)
-        else:
-            logger.info("clip_transcoded_to_h264", path=str(target_p), encoder=encoder)
-
-        return True
-
-    except Exception as e:
-        logger.error("transcode_exception", error=str(e), path=input_path)
-        if target_p.exists():
-            target_p.unlink()
-        return False
+    logger.error("all_transcode_encoders_failed", path=input_path, attempted=encoders_to_try)
+    return False
 
 
 class TranscoderWorker(threading.Thread):
