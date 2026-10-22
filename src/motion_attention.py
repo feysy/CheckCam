@@ -91,8 +91,17 @@ class MotionAttentionPreprocessor:
 
     def compute_motion_masks(self, frames: list[np.ndarray]) -> list[np.ndarray | None]:
         """
-        Compute dilated motion mask for each keyframe using sequential frame differencing.
-        Returns a list of binary masks (or None if a frame has no detected motion).
+        Compute dilated motion mask for each keyframe.
+
+        Uses a two-pass approach:
+          1. Global accumulated mask: union of all sequential diffs to find
+             regions with *any* motion across the clip.
+          2. Per-frame mask: intersection of the per-frame diff with the
+             accumulated mask, ensuring isolated transient flashes (headlights)
+             don't dominate when they only appear between one pair of keyframes.
+
+        The accumulated mask acts as a spatial prior — regions that change in
+        multiple pairs are boosted, while single-pair transients are suppressed.
         """
         n = len(frames)
         if n < 2:
@@ -114,24 +123,17 @@ class MotionAttentionPreprocessor:
             k_size += 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
 
-        masks: list[np.ndarray | None] = []
         diff_buf = self._get_buffer("diff", gray_shape, np.uint8)
         thresh_buf = self._get_buffer("thresh", gray_shape, np.uint8)
-        aux_diff_buf = self._get_buffer("aux_diff", gray_shape, np.uint8)
 
-        for i in range(n):
-            # Compute absolute frame difference with adjacent sequential keyframe(s)
-            if i == 0:
-                cv2.absdiff(gray_frames[0], gray_frames[1], dst=diff_buf)
-            elif i == n - 1:
-                cv2.absdiff(gray_frames[-1], gray_frames[-2], dst=diff_buf)
-            else:
-                # Max difference between preceding and succeeding keyframe to cover motion silhouette
-                cv2.absdiff(gray_frames[i], gray_frames[i - 1], dst=diff_buf)
-                cv2.absdiff(gray_frames[i], gray_frames[i + 1], dst=aux_diff_buf)
-                cv2.max(diff_buf, aux_diff_buf, dst=diff_buf)
+        # --- Pass 1: build per-pair binary masks and accumulate ---
+        # Accumulator counts how many sequential pairs show motion at each pixel
+        accumulator = self._get_buffer("accumulator", gray_shape, np.float32)
+        accumulator.fill(0.0)
+        pair_masks: list[np.ndarray] = []
 
-            # Threshold difference matrix into binary mask
+        for i in range(n - 1):
+            cv2.absdiff(gray_frames[i], gray_frames[i + 1], dst=diff_buf)
             cv2.threshold(
                 diff_buf,
                 self.config.difference_threshold,
@@ -139,17 +141,62 @@ class MotionAttentionPreprocessor:
                 cv2.THRESH_BINARY,
                 dst=thresh_buf,
             )
+            pair_mask = thresh_buf.copy()
+            pair_masks.append(pair_mask)
+            # Add normalized contribution to accumulator (each pair contributes 1.0)
+            accumulator += (pair_mask.astype(np.float32) / 255.0)
 
-            # Morphological dilation to bridge minor gaps within moving subject's silhouette
+        # --- Pass 2: consistency filter ---
+        # Regions with motion in fewer than half the pairs are considered transient
+        # (e.g., a headlight flash appears in 1 of 2 pairs → suppressed)
+        # For n=3 keyframes (2 pairs): threshold = 1.0 → must appear in both
+        # For n=4 keyframes (3 pairs): threshold = 1.5 → at least 2 of 3
+        num_pairs = n - 1
+        if num_pairs >= 2:
+            consistency_threshold = num_pairs * 0.5
+        else:
+            # Only 1 pair — can't filter, keep everything
+            consistency_threshold = 0.5
+
+        # Build sustained motion mask: areas with consistent motion across pairs
+        sustained_mask = self._get_buffer("sustained", gray_shape, np.uint8)
+        sustained_mask[:] = (accumulator >= consistency_threshold).astype(np.uint8) * 255
+
+        # Dilate the sustained mask to fill gaps
+        dilated_sustained = self._get_buffer("dilated_sustained", gray_shape, np.uint8)
+        cv2.dilate(
+            sustained_mask,
+            kernel,
+            dst=dilated_sustained,
+            iterations=self.config.dilation_iterations,
+        )
+
+        # --- Pass 3: per-frame masks combined with sustained mask ---
+        masks: list[np.ndarray | None] = []
+        for i in range(n):
+            # Per-frame difference: union of adjacent pair diffs
+            if i == 0:
+                per_frame = pair_masks[0]
+            elif i == n - 1:
+                per_frame = pair_masks[-1]
+            else:
+                per_frame = cv2.max(pair_masks[i - 1], pair_masks[i])
+
+            # Intersect per-frame motion with dilated sustained mask
+            # This keeps only the motion regions that are part of sustained movement
+            combined = self._get_buffer(f"combined_{i}", gray_shape, np.uint8)
+            cv2.bitwise_and(per_frame, dilated_sustained, dst=combined)
+
+            # Final dilation for this frame
             dilated_buf = self._get_buffer(f"dilated_{i}", gray_shape, np.uint8)
             cv2.dilate(
-                thresh_buf,
+                combined,
                 kernel,
                 dst=dilated_buf,
-                iterations=self.config.dilation_iterations,
+                iterations=max(1, self.config.dilation_iterations // 2),
             )
 
-            # Check if motion mask is empty (FR-3.2)
+            # Check minimum motion area
             motion_pixels = cv2.countNonZero(dilated_buf)
             motion_pct = (motion_pixels / dilated_buf.size) * 100.0
 
@@ -162,7 +209,7 @@ class MotionAttentionPreprocessor:
                 )
                 masks.append(None)
             else:
-                masks.append(dilated_buf)
+                masks.append(dilated_buf.copy())
 
         return masks
 

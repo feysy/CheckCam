@@ -200,8 +200,12 @@ class ClipProcessor:
             return
 
         # 2. Motion-Attention Frame Preprocessing (FR-3.1, FR-3.2)
+        motion_masks = None
         if self.motion_preprocessor and self.motion_preprocessor.config.enabled:
-            focused_frames = self.motion_preprocessor.process_keyframes(raw_frames)
+            motion_masks = self.motion_preprocessor.compute_motion_masks(raw_frames)
+            focused_frames = []
+            for frame, mask in zip(raw_frames, motion_masks):
+                focused_frames.append(self.motion_preprocessor.attenuate_background(frame, mask))
             inference_keyframes = [Image.fromarray(f) for f in focused_frames]
             logger.debug(
                 "motion_attention_applied",
@@ -212,19 +216,43 @@ class ClipProcessor:
         else:
             inference_keyframes = raw_keyframes
 
-        # Debug: save actual keyframes used for embedding if enabled
+        # Debug: save raw keyframes, motion masks, and processed keyframes
         if getattr(self, "debug", None) and self.debug.save_keyframes:
-            from pathlib import Path
             debug_root = Path(self.debug.debug_dir)
             debug_root.mkdir(parents=True, exist_ok=True)
             clip_dir = debug_root / f"clip_{clip_id}"
             clip_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save raw keyframes (before any motion-attention processing)
+            for idx, img in enumerate(raw_keyframes):
+                try:
+                    img.save(clip_dir / f"raw_{idx}.jpg", format="JPEG")
+                except Exception as e:
+                    logger.error("debug_raw_save_failed", clip_id=clip_id, error=str(e))
+
+            # Save motion masks as grayscale images (white = motion detected)
+            if motion_masks is not None:
+                for idx, mask in enumerate(motion_masks):
+                    try:
+                        if mask is not None:
+                            mask_img = Image.fromarray(mask, mode="L")
+                        else:
+                            # Empty mask = all black (no motion detected for this frame)
+                            h, w = raw_frames[idx].shape[:2]
+                            mask_img = Image.new("L", (w, h), 0)
+                        mask_img.save(clip_dir / f"mask_{idx}.jpg", format="JPEG")
+                    except Exception as e:
+                        logger.error("debug_mask_save_failed", clip_id=clip_id, error=str(e))
+
+            # Save processed keyframes (what actually goes to the embedding model)
             for idx, img in enumerate(inference_keyframes):
                 try:
-                    img_path = clip_dir / f"kf_{idx}.jpg"
-                    img.save(img_path, format="JPEG")
+                    img.save(clip_dir / f"kf_{idx}.jpg", format="JPEG")
                 except Exception as e:
                     logger.error("debug_keyframe_save_failed", clip_id=clip_id, error=str(e))
+
+            logger.info("debug_keyframes_saved", clip_id=clip_id, dir=str(clip_dir))
+
             # Rotate old debug clips, keep only latest N
             try:
                 all_dirs = sorted(
