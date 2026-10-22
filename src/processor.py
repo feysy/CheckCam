@@ -96,8 +96,15 @@ class ClipProcessor:
 
     def extract_keyframes(self, video_path: str) -> tuple[list[np.ndarray], list[Image.Image]]:
         """
-        Extract uniformly spaced keyframes from a video clip.
-        Returns (raw_rgb_frames, raw_pil_images).
+        Extract keyframes from the center portion of a video clip.
+
+        Samples uniformly within the middle 50% of the clip so frames are
+        clustered around the motion event (which triggers recording) rather
+        than including static start/end frames.
+
+        For a 75-frame clip with 5 keyframes:
+          Full-span:   [0, 18, 37, 55, 74]
+          Center 50%:  [18, 27, 37, 46, 56]  ← much tighter around the action
         """
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -107,13 +114,25 @@ class ClipProcessor:
             cap.release()
             return [], []
 
-        # Calculate frame indices for uniform sampling
         n = min(self.keyframes_per_clip, total_frames)
+
+        # Define the center sampling window (middle 50% of the clip)
+        # margin = 25% of total frames on each side
+        margin_pct = 0.25
+        win_start = int(total_frames * margin_pct)
+        win_end = int(total_frames * (1.0 - margin_pct))
+
+        # For very short clips, fall back to full span
+        if win_end - win_start < n:
+            win_start = 0
+            win_end = total_frames - 1
+
         if n == 1:
-            indices = [0]
+            indices = [total_frames // 2]  # single keyframe → dead center
         else:
             indices = [
-                int(i * (total_frames - 1) / (n - 1)) for i in range(n)
+                int(win_start + i * (win_end - win_start) / (n - 1))
+                for i in range(n)
             ]
 
         raw_frames = []
@@ -131,7 +150,9 @@ class ClipProcessor:
             "keyframes_extracted",
             path=video_path,
             count=len(raw_frames),
-            indices=indices
+            total_frames=total_frames,
+            window=f"[{win_start}, {win_end}]",
+            indices=indices,
         )
         return raw_frames, pil_images
 
