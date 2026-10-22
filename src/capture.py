@@ -247,9 +247,9 @@ def run_capture_daemon(config_path: str = "config.yaml"):
 
     try:
         while True:
-            # Periodically reload dynamic settings from database without restarting daemon
+            # Periodically reload dynamic settings from database without restarting daemon (every 10s)
             now = time.time()
-            if now - last_settings_check > 5.0:
+            if now - last_settings_check > 10.0:
                 last_settings_check = now
                 try:
                     cur_settings = db.get_settings()

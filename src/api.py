@@ -10,6 +10,7 @@ Start with: uvicorn src.api:app --host 0.0.0.0 --port 8000
 """
 
 import subprocess
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -200,13 +201,20 @@ async def health_check():
     }
 
 
+_CAPTURE_STATUS_CACHE = {"result": None, "expires_at": 0.0}
+
+
 @app.get("/api/capture/status")
 async def get_capture_status():
     """
     Check if the camera capture daemon is actively watching.
     Queries systemctl checkcam-daemon.service (with manual process fallback).
-    If inactive, the system is simply on standby / disabled, not in failure.
+    Cached for 10 seconds to avoid unnecessary subprocess fork overhead on Raspberry Pi.
     """
+    now = time.time()
+    if _CAPTURE_STATUS_CACHE["result"] is not None and now < _CAPTURE_STATUS_CACHE["expires_at"]:
+        return _CAPTURE_STATUS_CACHE["result"]
+
     is_watching = False
     service_status = "inactive"
 
@@ -239,11 +247,14 @@ async def get_capture_status():
         except Exception:
             pass
 
-    return {
+    result = {
         "watching": is_watching,
         "status": service_status,
         "service": "checkcam-daemon.service",
     }
+    _CAPTURE_STATUS_CACHE["result"] = result
+    _CAPTURE_STATUS_CACHE["expires_at"] = now + 10.0
+    return result
 
 
 @app.get("/clips/pending")

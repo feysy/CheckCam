@@ -62,9 +62,12 @@ export default function App() {
     fetchRulesAndActions();
     fetchSettings();
 
+    // Periodically update health and capture status every 10s only when browser tab is active
     const interval = setInterval(() => {
-      checkHealth();
-      checkCaptureStatus();
+      if (!document.hidden) {
+        checkHealth();
+        checkCaptureStatus();
+      }
     }, 10000);
     return () => clearInterval(interval);
   }, []);
