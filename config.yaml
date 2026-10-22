@@ -1,0 +1,49 @@
+# === CheckCam Configuration ===
+
+# Camera source
+camera:
+  source: 0                    # 0 = default USB webcam, or RTSP URL string
+  fps: 15                      # Capture framerate (lower = less CPU)
+  resolution: [640, 480]       # Capture resolution [width, height]
+
+# Clip recording settings
+recording:
+  clip_duration_sec: 5         # Duration of each recorded clip
+  motion_threshold: 25         # Pixel difference threshold for motion detection (0-255)
+  min_motion_area_pct: 1.5     # Minimum percentage of frame area that must change
+
+# Storage paths
+storage:
+  clip_dir: "./data/clips"          # Directory for recorded video clips
+  database_path: "./checkcam.db"
+  model_dir: "./models"
+
+# SigLIP model configuration
+model:
+  repo_id: "Xenova/siglip-base-patch16-224"
+  vision_model: "onnx/vision_model_int8.onnx"
+  text_model: "onnx/text_model_int8.onnx"
+  tokenizer_id: "google/siglip-base-patch16-224"
+  embedding_dim: 768
+  image_size: 224
+  max_text_length: 64
+  keyframes_per_clip: 3         # Number of uniformly sampled keyframes
+
+# Zero-shot classification settings (rules are stored in SQLite database)
+rules:
+  confidence_threshold: 0.05
+
+
+# Telegram alerts
+telegram:
+  bot_token: ""                # Set your Telegram bot token here
+  chat_id: ""                  # Set your Telegram chat ID here
+  enabled: true
+
+# ZeroMQ IPC
+zmq:
+  ipc_path: "ipc:///tmp/checkcam_pipeline.sock"
+
+# Logging
+logging:
+  level: "INFO"                # DEBUG, INFO, WARNING, ERROR

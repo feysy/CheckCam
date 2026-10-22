@@ -1,0 +1,45 @@
+# Environment & Virtualenv
+.venv/
+env/
+venv/
+
+# AI Models & Large Weights
+models/
+*.onnx
+
+# Application Data & Media Storage
+data/
+*.mp4
+*.jpg
+*.jpeg
+*.png
+
+# SQLite Databases & Journals
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Frontend (Node / Vite)
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sockets & Logs
+*.sock
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
