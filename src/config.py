@@ -65,6 +65,7 @@ class AppConfig:
     rules: RulesConfig
     telegram: TelegramConfig
     zmq_ipc_path: str
+    zmq_transcode_ipc_path: str
     log_level: str
 
 
@@ -85,5 +86,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         rules=RulesConfig(**raw["rules"]),
         telegram=TelegramConfig(**raw["telegram"]),
         zmq_ipc_path=raw["zmq"]["ipc_path"],
+        zmq_transcode_ipc_path=raw["zmq"].get(
+            "transcode_ipc_path", "ipc:///tmp/checkcam_transcode.sock"
+        ),
         log_level=raw["logging"]["level"],
     )

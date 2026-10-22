@@ -47,6 +47,7 @@ telegram:
 # ZeroMQ IPC
 zmq:
   ipc_path: "ipc:///tmp/checkcam_pipeline.sock"
+  transcode_ipc_path: "ipc:///tmp/checkcam_transcode.sock"
 
 # Logging
 logging:

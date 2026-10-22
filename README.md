@@ -23,31 +23,40 @@ CheckCam transforms an ordinary USB webcam or RTSP camera stream into an intelli
 
 ```mermaid
 graph TD
-    subgraph "Process 1: Capture Daemon (src.capture)"
-        CAM["USB / RTSP Camera"] --> MD["Motion Detector\n(OpenCV)"]
-        MD -->|motion detected| CW["Clip Writer\n(5s MP4)"]
+    subgraph "Process 1: Ultra-Lean Capture Daemon (src.capture)"
+        CAM["USB / RTSP / Pi CSI Camera"] --> MD["Motion Detector\n(OpenCV Differencing)"]
+        MD -->|motion detected| CW["Clip Writer\n(Fast OpenCV mp4v)"]
         CW --> DISK["Local Filesystem\n(data/clips/)"]
         CW --> DB_C["SQLite\n(clips table, processed=0)"]
         CW --> ZMQ_PUB["ZeroMQ PUSH\n(ipc:///tmp/checkcam_pipeline.sock)"]
     end
 
     subgraph "Process 2: Engine & Web Studio (src.api)"
-        ZMQ_SUB["ZeroMQ PULL"] --> BG["Background Clip Worker"]
-        BG --> KF["Keyframe Extractor"]
-        KF --> SIG_V["SigLIP Vision Encoder\n(INT8 ONNX)"]
-        SIG_V --> RULES["Rule Evaluator\n(Max-Keyframe Cosine Similarity)"]
-        
-        RULES -->|DISCARD| DEL["Delete MP4"]
-        RULES -->|SAVE| THUMB["Save Thumbnail\n(data/thumbnails/)"]
-        RULES -->|ALERT| TG["Telegram Bot Alert\n(Snapshot + Caption)"]
-        
-        THUMB --> VEC["sqlite-vec INSERT\n(768-dim normalized)"]
-        
-        API["FastAPI App\n(:8000)"] --> UI["React SPA Studio\n(Vite Build)"]
-        API --> SEARCH["POST /search\n(KNN Vector Query)"]
+        subgraph "Thread 1: FastAPI & Web Studio"
+            API["FastAPI App (:8000)"] --> UI["React SPA Studio (Vite)"]
+            API --> STREAM["GET /api/clips/{id}/video\n(H.264 Web Streaming)"]
+            API --> SEARCH["POST /search (sqlite-vec KNN)"]
+        end
+
+        subgraph "Thread 2: AI Processor Worker (src.processor)"
+            ZMQ_SUB["ZeroMQ PULL\n(checkcam_pipeline.sock)"] --> KF["Keyframe Extractor"]
+            KF --> SIG_V["SigLIP Vision Encoder\n(INT8 ONNX)"]
+            SIG_V --> RULES["Rule Evaluator\n(Max-Keyframe Cosine Sim)"]
+            RULES -->|DISCARD| DEL["Delete Raw File"]
+            RULES -->|SAVE / ALERT| VEC["sqlite-vec INSERT\n(768-dim normalized)"]
+            RULES -->|SAVE / ALERT| THUMB["Save Thumbnail\n(data/thumbnails/)"]
+            RULES -->|ALERT| TG["Telegram Alert\n(Snapshot + Caption)"]
+            RULES -->|SAVE / ALERT| ZMQ_TC_PUSH["ZeroMQ PUSH\n(ipc:///tmp/checkcam_transcode.sock)"]
+        end
+
+        subgraph "Thread 3: Video Transcoder Worker (src.transcoder)"
+            ZMQ_TC_PULL["ZeroMQ PULL\n(checkcam_transcode.sock)"] --> ENC["Hardware / Software H.264 Transcoder\n(h264_v4l2m2m / libopenh264)"]
+            ENC --> H264["Atomic Replace with Browser-Ready\nH.264 (avc1 + yuv420p + faststart)"]
+        end
     end
 
     ZMQ_PUB -.->|"Clip ID"| ZMQ_SUB
+    ZMQ_TC_PUSH -.->|"Clip ID"| ZMQ_TC_PULL
 ```
 
 ---

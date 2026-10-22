@@ -88,31 +88,6 @@ class ClipWriter:
         return filepath, timestamp
 
 
-def run_capture_daemon(config_path: str = "config.yaml"):
-    """
-    Main capture loop — runs until interrupted with Ctrl+C.
-
-    Flow:
-    1. Read frames continuously from camera
-    2. When motion detected → buffer frames for clip_duration_sec
-    3. Write clip to disk → insert metadata in SQLite → signal via ZMQ
-    4. Resume monitoring
-    """
-    cfg = load_config(config_path)
-
-    # Initialize components
-    db = Database(cfg.storage.database_path, cfg.model.embedding_dim)
-    db.connect()
-
-    detector = MotionDetector(
-        cfg.recording.motion_threshold,
-        cfg.recording.min_motion_area_pct,
-    )
-    writer = ClipWriter(
-        cfg.storage.clip_dir, cfg.camera.fps, tuple(cfg.camera.resolution)
-    )
-    pusher = ZmqPusher(cfg.zmq_ipc_path)
-
 class BaseCameraSource:
     """Abstract interface for video capture sources."""
 

@@ -1,9 +1,14 @@
 """
-FastAPI application — search API + ZeroMQ background processor.
+FastAPI application — semantic search API + multi-threaded background workers.
+
+Architecture:
+- Thread 1: FastAPI asyncio loop (serving HTTP search, streaming, and UI)
+- Thread 2: ProcessorWorker (ZeroMQ PULL -> SigLIP ONNX inference -> SQLite)
+- Thread 3: TranscoderWorker (ZeroMQ PULL -> FFmpeg H.264 encoding with faststart)
 
 Start with: uvicorn src.api:app --host 0.0.0.0 --port 8000
 """
-import asyncio
+
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -15,32 +20,38 @@ import structlog
 from src.config import load_config
 from src.database import Database
 from src.embedding import SigLIPEmbedder
-from src.processor import ClipProcessor
+from src.processor import ProcessorWorker
+from src.transcoder import TranscoderWorker
 from src.alerting import TelegramAlerter
-from src.zmq_bridge import ZmqPuller
 
 logger = structlog.get_logger()
 
 # --- Global state (initialized in lifespan) ---
 db: Database = None
 embedder: SigLIPEmbedder = None
-processor: ClipProcessor = None
-zmq_puller: ZmqPuller = None
+processor_worker: ProcessorWorker = None
+transcoder_worker: TranscoderWorker = None
+
+
+def _reload_processor_rules():
+    """Notify the processor thread to reload rule embeddings from SQLite."""
+    if processor_worker and processor_worker.processor:
+        processor_worker.processor.reload_rules()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: load model, connect DB, start ZMQ listener."""
-    global db, embedder, processor, zmq_puller
+    """Startup: load model, connect DB, start processor and transcoder worker threads."""
+    global db, embedder, processor_worker, transcoder_worker
 
     cfg = load_config()
 
-    # 1. Database
+    # 1. Database for API queries
     db = Database(cfg.storage.database_path, cfg.model.embedding_dim)
     db.connect()
     logger.info("database_connected", path=cfg.storage.database_path)
 
-    # 2. Embedding engine (resident in memory)
+    # 2. Embedding engine (resident in memory for natural language search)
     embedder = SigLIPEmbedder(cfg.storage.model_dir, cfg.model)
     logger.info("embedding_engine_loaded")
 
@@ -50,78 +61,45 @@ async def lifespan(app: FastAPI):
         alerter = TelegramAlerter(cfg.telegram.bot_token, cfg.telegram.chat_id)
         logger.info("telegram_alerter_enabled")
 
-    # 4. Clip processor (loads classification rules from SQLite)
-    processor = ClipProcessor(
-        embedder=embedder, db=db, alerter=alerter,
-        confidence_threshold=cfg.rules.confidence_threshold,
-        keyframes_per_clip=cfg.model.keyframes_per_clip
+    # 4. Transcoder Worker Thread (dedicated H.264 video conversion)
+    transcoder_worker = TranscoderWorker(
+        db_path=cfg.storage.database_path,
+        embedding_dim=cfg.model.embedding_dim,
+        zmq_ipc_path=cfg.zmq_transcode_ipc_path,
     )
+    transcoder_worker.start()
+    logger.info("transcoder_thread_initialized", ipc=cfg.zmq_transcode_ipc_path)
 
-    # 5. ZeroMQ listener background task
-    zmq_puller = ZmqPuller(cfg.zmq_ipc_path)
-    zmq_task = asyncio.create_task(_zmq_listener_loop())
-    logger.info("zmq_listener_started", ipc=cfg.zmq_ipc_path)
+    # 5. Processor Worker Thread (dedicated AI inference and vector indexing)
+    processor_worker = ProcessorWorker(
+        db_path=cfg.storage.database_path,
+        embedding_dim=cfg.model.embedding_dim,
+        zmq_pipeline_ipc=cfg.zmq_ipc_path,
+        zmq_transcode_ipc=cfg.zmq_transcode_ipc_path,
+        embedder=embedder,
+        alerter=alerter,
+        confidence_threshold=cfg.rules.confidence_threshold,
+        keyframes_per_clip=cfg.model.keyframes_per_clip,
+    )
+    processor_worker.start()
+    logger.info("processor_thread_initialized", ipc=cfg.zmq_ipc_path)
 
     yield  # --- App is running ---
 
-    # Shutdown
-    zmq_task.cancel()
-    zmq_puller.close()
-    db.close()
+    # Shutdown threads cleanly
+    if processor_worker:
+        processor_worker.stop()
+    if transcoder_worker:
+        transcoder_worker.stop()
+
+    if processor_worker:
+        processor_worker.join(timeout=3)
+    if transcoder_worker:
+        transcoder_worker.join(timeout=3)
+
+    if db:
+        db.close()
     logger.info("shutdown_complete")
-
-
-async def _zmq_listener_loop():
-    """Background loop: listen for ZMQ signals, process targeted or pending clips."""
-    while True:
-        try:
-            msg = await asyncio.to_thread(zmq_puller.receive, 1000)
-            if msg:
-                logger.info("zmq_signal_received", message=msg)
-                msg_str = msg.strip()
-                if msg_str.isdigit():
-                    await _process_single_clip(int(msg_str))
-                else:
-                    await _process_pending_clips()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("zmq_listener_error", error=str(e))
-        await asyncio.sleep(0.1)
-
-
-async def _process_single_clip(clip_id: int):
-    """Process a single specific clip signaled by ID."""
-    clip = db.get_clip_by_id(clip_id)
-    if not clip:
-        logger.warning("clip_not_found_for_id", clip_id=clip_id)
-        return
-
-    if clip["processed"]:
-        logger.debug("clip_already_processed", clip_id=clip_id)
-        return
-
-    logger.info("processing_targeted_clip", clip_id=clip_id)
-    try:
-        await processor.process_clip(clip)
-    except Exception as e:
-        logger.error("clip_processing_error",
-                     clip_id=clip["id"], error=str(e))
-
-
-async def _process_pending_clips():
-    """Query all unprocessed clips and process them (fallback / batch)."""
-    pending = db.get_unprocessed_clips()
-    if not pending:
-        return
-
-    logger.info("processing_pending_clips", count=len(pending))
-    for clip in pending:
-        try:
-            await processor.process_clip(clip)
-        except Exception as e:
-            logger.error("clip_processing_error",
-                         clip_id=clip["id"], error=str(e))
 
 
 # --- FastAPI App ---
@@ -129,7 +107,7 @@ async def _process_pending_clips():
 app = FastAPI(
     title="CheckCam API",
     description="Local-first smart security camera — semantic search API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -200,9 +178,9 @@ async def get_recent_clips(limit: int = 30):
     ]
 
 
-@app.get("/api/clips/{clip_id}/video")
+@app.api_route("/api/clips/{clip_id}/video", methods=["GET", "HEAD"])
 async def get_clip_video(clip_id: int):
-    """Stream clip MP4 video."""
+    """Stream clip MP4 video with browser-compatible H.264 headers."""
     clip = db.get_clip_by_id(clip_id)
     if not clip or not Path(clip["file_path"]).exists():
         raise HTTPException(status_code=404, detail="Clip video file not found")
@@ -216,6 +194,8 @@ async def health_check():
         "status": "ok",
         "model_loaded": embedder is not None,
         "db_connected": db is not None,
+        "processor_alive": processor_worker.is_alive() if processor_worker else False,
+        "transcoder_alive": transcoder_worker.is_alive() if transcoder_worker else False,
     }
 
 
@@ -260,7 +240,7 @@ async def add_rule(req: CreateRuleRequest):
 
     try:
         rule_id = db.add_rule(req.description.strip(), req.action_id)
-        processor.reload_rules()
+        _reload_processor_rules()
         return {
             "status": "created",
             "rule_id": rule_id,
@@ -278,14 +258,14 @@ async def delete_rule(rule_id: int):
     if not deleted:
         raise HTTPException(status_code=404, detail="Rule not found")
 
-    processor.reload_rules()
+    _reload_processor_rules()
     return {"status": "deleted", "rule_id": rule_id}
 
 
 @app.post("/rules/reload")
 async def reload_rules():
     """Explicitly trigger in-memory recomputation of all rule embeddings from SQLite."""
-    processor.reload_rules()
+    _reload_processor_rules()
     return {"status": "reloaded", "rule_count": len(db.get_rules())}
 
 
@@ -296,5 +276,3 @@ app.mount("/thumbnails", StaticFiles(directory="data/thumbnails"), name="thumbna
 frontend_dist = Path("frontend/dist")
 if frontend_dist.exists():
     app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
-
-

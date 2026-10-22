@@ -3,7 +3,7 @@ Clip processing pipeline.
 
 Takes unprocessed video clips, extracts keyframes, encodes them via SigLIP,
 evaluates against user-defined natural language rules, and routes actions
-(DISCARD / SAVE / ALERT).
+(DISCARD / SAVE / ALERT). Decoupled from video transcoding and web serving.
 """
 
 import cv2
@@ -11,11 +11,13 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 import structlog
+import threading
+import asyncio
 
 from src.embedding import SigLIPEmbedder
 from src.database import Database
 from src.alerting import TelegramAlerter
-from src.config import RulesConfig
+from src.zmq_bridge import ZmqPusher, ZmqPuller
 
 logger = structlog.get_logger()
 
@@ -27,15 +29,17 @@ class ClipProcessor:
         self,
         embedder: SigLIPEmbedder,
         db: Database,
-        alerter: TelegramAlerter | None,
+        alerter: TelegramAlerter | None = None,
         confidence_threshold: float = 0.05,
         keyframes_per_clip: int = 3,
+        transcode_pusher: ZmqPusher | None = None,
     ):
         self.embedder = embedder
         self.db = db
         self.alerter = alerter
         self.confidence_threshold = confidence_threshold
         self.keyframes_per_clip = keyframes_per_clip
+        self.transcode_pusher = transcode_pusher
 
         # Load rules from DB and compute text embeddings
         self.reload_rules()
@@ -95,9 +99,12 @@ class ClipProcessor:
                 keyframes.append(Image.fromarray(rgb))
 
         cap.release()
-        logger.debug("keyframes_extracted",
-                      path=video_path, count=len(keyframes),
-                      indices=indices)
+        logger.debug(
+            "keyframes_extracted",
+            path=video_path,
+            count=len(keyframes),
+            indices=indices
+        )
         return keyframes
 
     def classify_clip(
@@ -140,15 +147,17 @@ class ClipProcessor:
 
         return best_category, best_prompt, best_score, best_kf_idx
 
-    async def process_clip(self, clip: dict):
+    def process_clip(self, clip: dict):
         """
         Full processing pipeline for a single clip.
 
         1. Extract keyframes from video file
         2. Encode keyframes into SigLIP image embeddings
         3. Classify against rule prompts (max across keyframes)
-        4. Execute action: DISCARD (delete file), SAVE (index vectors),
-           or ALERT (index vectors + send Telegram notification)
+        4. Execute action:
+           - DISCARD: delete raw file from disk, mark DB.
+           - SAVE / ALERT: index vectors, save thumbnail, queue for H.264
+             transcoding on the transcoder thread, send alert if requested.
         """
         clip_id = clip["id"]
         file_path = clip["file_path"]
@@ -207,17 +216,120 @@ class ClipProcessor:
             self.db.mark_processed(clip_id, action_label, thumbnail_path=thumb_path)
             logger.info("clip_indexed", clip_id=clip_id, action=action_label, thumbnail=thumb_path)
 
+            # Signal transcoder thread to convert raw recording to browser-ready H.264
+            if self.transcode_pusher:
+                self.transcode_pusher.send(str(clip_id))
+                logger.info("clip_queued_for_transcoding", clip_id=clip_id)
+
             # Send Telegram alert if action is ALERT
             if "ALERT" in action.upper() and self.alerter:
-                snapshot = keyframes[best_kf_idx]  # Keyframe that matched best
-                await self.alerter.send_alert(
-                    clip_id=clip_id,
-                    file_path=file_path,
-                    timestamp=clip["timestamp"],
-                    matched_prompt=matched_prompt,
-                    confidence=score,
-                    snapshot=snapshot,
-                )
+                snapshot = keyframes[best_kf_idx]
+                try:
+                    asyncio.run(self.alerter.send_alert(
+                        clip_id=clip_id,
+                        file_path=file_path,
+                        timestamp=clip["timestamp"],
+                        matched_prompt=matched_prompt,
+                        confidence=score,
+                        snapshot=snapshot,
+                    ))
+                except Exception as e:
+                    logger.error("telegram_alert_dispatch_failed", clip_id=clip_id, error=str(e))
         else:
             logger.warning("unrecognized_action_fallback", clip_id=clip_id, action=action)
             self.db.mark_processed(clip_id, f"UNKNOWN_{action}")
+
+
+class ProcessorWorker(threading.Thread):
+    """
+    Independent worker thread dedicated to AI keyframe extraction and classification.
+
+    Pulls clip IDs from the capture daemon via ZeroMQ, runs SigLIP ONNX inference,
+    updates SQLite vector storage, and pushes saved/alerted clips to the transcoder queue.
+    Completely frees the FastAPI web loop.
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        embedding_dim: int,
+        zmq_pipeline_ipc: str,
+        zmq_transcode_ipc: str,
+        embedder: SigLIPEmbedder,
+        alerter: TelegramAlerter | None = None,
+        confidence_threshold: float = 0.05,
+        keyframes_per_clip: int = 3,
+    ):
+        super().__init__(name="ProcessorWorkerThread", daemon=True)
+        self.db_path = db_path
+        self.embedding_dim = embedding_dim
+        self.zmq_pipeline_ipc = zmq_pipeline_ipc
+        self.zmq_transcode_ipc = zmq_transcode_ipc
+        self.embedder = embedder
+        self.alerter = alerter
+        self.confidence_threshold = confidence_threshold
+        self.keyframes_per_clip = keyframes_per_clip
+        self._stop_event = threading.Event()
+        self.processor: ClipProcessor | None = None
+
+    def run(self):
+        """Worker thread loop."""
+        logger.info("processor_worker_started", ipc=self.zmq_pipeline_ipc)
+
+        # Thread-local database connection
+        db = Database(self.db_path, self.embedding_dim)
+        db.connect()
+
+        puller = ZmqPuller(self.zmq_pipeline_ipc)
+        transcode_pusher = ZmqPusher(self.zmq_transcode_ipc)
+
+        self.processor = ClipProcessor(
+            embedder=self.embedder,
+            db=db,
+            alerter=self.alerter,
+            confidence_threshold=self.confidence_threshold,
+            keyframes_per_clip=self.keyframes_per_clip,
+            transcode_pusher=transcode_pusher,
+        )
+
+        try:
+            while not self._stop_event.is_set():
+                msg = puller.receive(timeout_ms=1000)
+                if not msg:
+                    continue
+
+                msg_str = msg.strip()
+                logger.info("processor_signal_received", message=msg_str)
+
+                if msg_str.isdigit():
+                    clip_id = int(msg_str)
+                    clip = db.get_clip_by_id(clip_id)
+                    if not clip:
+                        logger.warning("clip_not_found_for_id", clip_id=clip_id)
+                        continue
+                    if clip["processed"]:
+                        logger.debug("clip_already_processed", clip_id=clip_id)
+                        continue
+
+                    self.processor.process_clip(clip)
+                else:
+                    # Fallback / batch process pending clips
+                    pending = db.get_unprocessed_clips()
+                    if pending:
+                        logger.info("processing_pending_clips", count=len(pending))
+                        for clip in pending:
+                            if self._stop_event.is_set():
+                                break
+                            self.processor.process_clip(clip)
+
+        except Exception as e:
+            logger.error("processor_worker_loop_error", error=str(e))
+        finally:
+            puller.close()
+            transcode_pusher.close()
+            db.close()
+            logger.info("processor_worker_stopped")
+
+    def stop(self):
+        """Signal the worker thread to terminate."""
+        self._stop_event.set()
