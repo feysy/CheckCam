@@ -83,6 +83,7 @@ async def lifespan(app: FastAPI):
         confidence_threshold=cfg.rules.confidence_threshold,
         keyframes_per_clip=cfg.model.keyframes_per_clip,
         motion_attention_config=cfg.motion_attention,
+        debug_config=cfg.debug,
     )
     processor_worker.start()
     logger.info("processor_thread_initialized", ipc=cfg.zmq_ipc_path)

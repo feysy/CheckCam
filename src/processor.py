@@ -19,6 +19,7 @@ from src.database import Database
 from src.alerting import TelegramAlerter
 from src.zmq_bridge import ZmqPusher, ZmqPuller
 from src.motion_attention import MotionAttentionPreprocessor, MotionAttentionConfig
+from src.config import DebugConfig
 
 logger = structlog.get_logger()
 
@@ -35,6 +36,7 @@ class ClipProcessor:
         keyframes_per_clip: int = 3,
         transcode_pusher: ZmqPusher | None = None,
         motion_preprocessor: MotionAttentionPreprocessor | None = None,
+        debug_config: DebugConfig | None = None,
     ):
         self.embedder = embedder
         self.db = db
@@ -43,6 +45,7 @@ class ClipProcessor:
         self.keyframes_per_clip = keyframes_per_clip
         self.transcode_pusher = transcode_pusher
         self.motion_preprocessor = motion_preprocessor or MotionAttentionPreprocessor()
+        self.debug = debug_config or DebugConfig()
 
         # Load rules from DB and compute text embeddings
         self.reload_rules()
@@ -209,6 +212,34 @@ class ClipProcessor:
         else:
             inference_keyframes = raw_keyframes
 
+        # Debug: save actual keyframes used for embedding if enabled
+        if getattr(self, "debug", None) and self.debug.save_keyframes:
+            from pathlib import Path
+            debug_root = Path(self.debug.debug_dir)
+            debug_root.mkdir(parents=True, exist_ok=True)
+            clip_dir = debug_root / f"clip_{clip_id}"
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            for idx, img in enumerate(inference_keyframes):
+                try:
+                    img_path = clip_dir / f"kf_{idx}.jpg"
+                    img.save(img_path, format="JPEG")
+                except Exception as e:
+                    logger.error("debug_keyframe_save_failed", clip_id=clip_id, error=str(e))
+            # Rotate old debug clips, keep only latest N
+            try:
+                all_dirs = sorted(
+                    [d for d in debug_root.iterdir() if d.is_dir()],
+                    key=lambda d: d.stat().st_mtime,
+                    reverse=True,
+                )
+                max_keep = self.debug.max_debug_clips
+                for old in all_dirs[max_keep:]:
+                    for f in old.rglob("*"):
+                        f.unlink(missing_ok=True)
+                    old.rmdir()
+            except Exception as e:
+                logger.error("debug_cleanup_failed", error=str(e))
+
         # 3. Generate image embeddings using motion-focused keyframes
         image_embeddings = self.embedder.encode_images(inference_keyframes)
 
@@ -298,6 +329,7 @@ class ProcessorWorker(threading.Thread):
         confidence_threshold: float = 0.05,
         keyframes_per_clip: int = 3,
         motion_attention_config: MotionAttentionConfig | None = None,
+        debug_config: DebugConfig | None = None,
     ):
         super().__init__(name="ProcessorWorkerThread", daemon=True)
         self.db_path = db_path
@@ -309,6 +341,7 @@ class ProcessorWorker(threading.Thread):
         self.confidence_threshold = confidence_threshold
         self.keyframes_per_clip = keyframes_per_clip
         self.motion_attention_config = motion_attention_config
+        self.debug_config = debug_config
         self._stop_event = threading.Event()
         self.processor: ClipProcessor | None = None
 
@@ -332,6 +365,7 @@ class ProcessorWorker(threading.Thread):
             keyframes_per_clip=self.keyframes_per_clip,
             transcode_pusher=transcode_pusher,
             motion_preprocessor=motion_preprocessor,
+            debug_config=self.debug_config,
         )
 
         try:
