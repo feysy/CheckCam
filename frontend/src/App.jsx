@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Search, Video, ShieldAlert, Sparkles, Clock, Play, 
   X, Filter, RefreshCw, Settings, Sliders, ExternalLink, Download,
-  Check, Save, Plus, Trash2, Camera, Bell, HardDrive, Cpu, AlertTriangle, Send, Film
+  Check, Save, Plus, Trash2, Camera, Bell, HardDrive, Cpu, AlertTriangle, Send, Film, Focus
 } from 'lucide-react';
 import './App.css';
 
@@ -47,7 +47,18 @@ export default function App() {
     storage: { clip_dir: './data/clips' },
     model: { keyframes_per_clip: 3 },
     rules: { confidence_threshold: 0.05 },
-    telegram: { enabled: false, bot_token: '', chat_id: '' }
+    telegram: { enabled: false, bot_token: '', chat_id: '' },
+    motion_attention: {
+      enabled: true,
+      mode: 'gray',
+      difference_threshold: 25,
+      dilation_iterations: 3,
+      dilation_kernel_size: 5,
+      gray_blend_ratio: 0.8,
+      blur_kernel_size: 31,
+      mask_blur_kernel_size: 15,
+      min_motion_area_pct: 0.05
+    }
   });
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -861,7 +872,167 @@ export default function App() {
               </div>
             </div>
 
-            {/* SECTION 5: Storage Directory */}
+            {/* SECTION 5: Motion-Attention Frame Preprocessing */}
+            <div className="settings-card glass-card full-width">
+              <div className="settings-card-header">
+                <div className="settings-card-title">
+                  <Focus size={19} color="var(--accent-cyan)" />
+                  <span>Motion-Attention Frame Preprocessing</span>
+                </div>
+
+                <div className="toggle-wrapper" style={{ gap: '12px' }}>
+                  <span style={{ fontSize: '0.85rem', color: settings.motion_attention?.enabled ? 'var(--accent-emerald)' : 'var(--text-muted)' }}>
+                    {settings.motion_attention?.enabled ? 'Active (Background Attenuated)' : 'Bypassed (Raw Frames)'}
+                  </span>
+                  <label className="switch">
+                    <input 
+                      type="checkbox"
+                      checked={settings.motion_attention?.enabled ?? true}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        motion_attention: { ...settings.motion_attention, enabled: e.target.checked }
+                      })}
+                    />
+                    <span className="slider-toggle"></span>
+                  </label>
+                </div>
+              </div>
+
+              <p style={{ margin: '0 0 16px 0', fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                Neutralizes static background elements (grays out or blurs) outside active motion masks, preventing car headlights or shifting shadows from hijacking Vision Transformer (SigLIP) patch-token attention.
+              </p>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
+                <div className="setting-row">
+                  <span className="setting-label">Attenuation Style</span>
+                  <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
+                    <button
+                      type="button"
+                      className={`btn-action-select ${settings.motion_attention?.mode === 'gray' ? 'active-gray' : ''}`}
+                      onClick={() => setSettings({
+                        ...settings,
+                        motion_attention: { ...settings.motion_attention, mode: 'gray' }
+                      })}
+                      style={{
+                        flex: 1, padding: '8px 12px', borderRadius: '8px', cursor: 'pointer',
+                        background: settings.motion_attention?.mode === 'gray' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255,255,255,0.04)',
+                        border: `1px solid ${settings.motion_attention?.mode === 'gray' ? 'var(--accent-cyan)' : 'var(--border-subtle)'}`,
+                        color: settings.motion_attention?.mode === 'gray' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                        fontWeight: 600, fontSize: '0.85rem'
+                      }}
+                    >
+                      Neutral Gray
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn-action-select ${settings.motion_attention?.mode === 'blur' ? 'active-blur' : ''}`}
+                      onClick={() => setSettings({
+                        ...settings,
+                        motion_attention: { ...settings.motion_attention, mode: 'blur' }
+                      })}
+                      style={{
+                        flex: 1, padding: '8px 12px', borderRadius: '8px', cursor: 'pointer',
+                        background: settings.motion_attention?.mode === 'blur' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255,255,255,0.04)',
+                        border: `1px solid ${settings.motion_attention?.mode === 'blur' ? 'var(--accent-purple)' : 'var(--border-subtle)'}`,
+                        color: settings.motion_attention?.mode === 'blur' ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                        fontWeight: 600, fontSize: '0.85rem'
+                      }}
+                    >
+                      Gaussian Blur
+                    </button>
+                  </div>
+                  <span className="setting-hint">
+                    {settings.motion_attention?.mode === 'gray' 
+                      ? 'Replaces static background with uniform 128 neutral gray for optimal ViT token contrast.' 
+                      : 'Applies strong Gaussian blur kernel across background while keeping subject 100% sharp.'}
+                  </span>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label-row">
+                    <span className="setting-label">Difference Sensitivity Threshold</span>
+                    <span className="setting-val-badge">{settings.motion_attention?.difference_threshold ?? 25}</span>
+                  </div>
+                  <input 
+                    type="range"
+                    min="5"
+                    max="80"
+                    step="1"
+                    className="setting-range"
+                    value={settings.motion_attention?.difference_threshold ?? 25}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      motion_attention: { ...settings.motion_attention, difference_threshold: parseInt(e.target.value, 10) }
+                    })}
+                  />
+                  <span className="setting-hint">cv2.absdiff intensity threshold (0-255). Lower = more sensitive to subtle movement.</span>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label-row">
+                    <span className="setting-label">Dilation Iterations</span>
+                    <span className="setting-val-badge">{settings.motion_attention?.dilation_iterations ?? 3}x</span>
+                  </div>
+                  <input 
+                    type="range"
+                    min="1"
+                    max="10"
+                    step="1"
+                    className="setting-range"
+                    value={settings.motion_attention?.dilation_iterations ?? 3}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      motion_attention: { ...settings.motion_attention, dilation_iterations: parseInt(e.target.value, 10) }
+                    })}
+                  />
+                  <span className="setting-hint">Morphological expansion cycles to bridge gaps and encompass full moving silhouette.</span>
+                </div>
+
+                {settings.motion_attention?.mode === 'gray' ? (
+                  <div className="setting-row">
+                    <div className="setting-label-row">
+                      <span className="setting-label">Gray Blend Strength</span>
+                      <span className="setting-val-badge">{Math.round((settings.motion_attention?.gray_blend_ratio ?? 0.8) * 100)}%</span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0.2"
+                      max="1.0"
+                      step="0.05"
+                      className="setting-range"
+                      value={settings.motion_attention?.gray_blend_ratio ?? 0.8}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        motion_attention: { ...settings.motion_attention, gray_blend_ratio: parseFloat(e.target.value) }
+                      })}
+                    />
+                    <span className="setting-hint">100% = solid uniform middle gray; 80% retains subtle contour context.</span>
+                  </div>
+                ) : (
+                  <div className="setting-row">
+                    <div className="setting-label-row">
+                      <span className="setting-label">Background Blur Radius</span>
+                      <span className="setting-val-badge">{settings.motion_attention?.blur_kernel_size ?? 31}px</span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="11"
+                      max="71"
+                      step="4"
+                      className="setting-range"
+                      value={settings.motion_attention?.blur_kernel_size ?? 31}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        motion_attention: { ...settings.motion_attention, blur_kernel_size: parseInt(e.target.value, 10) }
+                      })}
+                    />
+                    <span className="setting-hint">Gaussian blur kernel diameter applied to regions outside the motion mask.</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* SECTION 6: Storage Directory */}
             <div className="settings-card glass-card">
               <div className="settings-card-header">
                 <div className="settings-card-title">

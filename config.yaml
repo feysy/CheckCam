@@ -37,6 +37,17 @@ model:
 rules:
   confidence_threshold: 0.05
 
+# Motion-Attention frame preprocessing
+motion_attention:
+  enabled: true                # Focus AI model exclusively on active movement zones
+  mode: "gray"                 # Attenuation mode: "gray" (neutral middle-gray) or "blur" (gaussian blur)
+  difference_threshold: 25     # Intensity difference threshold for motion mask (0-255)
+  dilation_iterations: 3       # Dilation iterations to bridge silhouette gaps
+  dilation_kernel_size: 5      # Kernel size for morphological dilation
+  gray_blend_ratio: 0.8        # Blend ratio for neutral gray mode (0.0 to 1.0)
+  blur_kernel_size: 31         # Background blur kernel size for blur mode
+
+
 
 # Telegram alerts
 telegram:

@@ -2,7 +2,7 @@
 
 import yaml
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -38,7 +38,7 @@ class ModelConfig:
     keyframes_per_clip: int
 
 
-from dataclasses import dataclass, field
+from src.motion_attention import MotionAttentionConfig
 
 
 @dataclass
@@ -64,6 +64,7 @@ class AppConfig:
     model: ModelConfig
     rules: RulesConfig
     telegram: TelegramConfig
+    motion_attention: MotionAttentionConfig
     zmq_ipc_path: str
     zmq_transcode_ipc_path: str
     log_level: str
@@ -88,6 +89,7 @@ def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
     model_data = dict(raw["model"])
     rules_data = dict(raw.get("rules", {}))
     telegram_data = dict(raw.get("telegram", {}))
+    motion_attention_data = dict(raw.get("motion_attention", {}))
 
     # Overlay from SQLite if database exists and use_db is True
     if use_db and Path(db_path).exists():
@@ -110,6 +112,8 @@ def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
                 rules_data["confidence_threshold"] = db_settings["rules"]["confidence_threshold"]
             if "telegram" in db_settings:
                 telegram_data.update(db_settings["telegram"])
+            if "motion_attention" in db_settings:
+                motion_attention_data.update(db_settings["motion_attention"])
         except Exception:
             pass
 
@@ -120,6 +124,7 @@ def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
         model=ModelConfig(**model_data),
         rules=RulesConfig(**rules_data),
         telegram=TelegramConfig(**telegram_data),
+        motion_attention=MotionAttentionConfig(**motion_attention_data),
         zmq_ipc_path=raw["zmq"]["ipc_path"],
         zmq_transcode_ipc_path=raw["zmq"].get(
             "transcode_ipc_path", "ipc:///tmp/checkcam_transcode.sock"

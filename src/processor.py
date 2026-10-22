@@ -18,12 +18,13 @@ from src.embedding import SigLIPEmbedder
 from src.database import Database
 from src.alerting import TelegramAlerter
 from src.zmq_bridge import ZmqPusher, ZmqPuller
+from src.motion_attention import MotionAttentionPreprocessor, MotionAttentionConfig
 
 logger = structlog.get_logger()
 
 
 class ClipProcessor:
-    """Processes video clips: extract keyframes → embed → classify → act."""
+    """Processes video clips: extract keyframes → motion-attention preproc → embed → classify → act."""
 
     def __init__(
         self,
@@ -33,6 +34,7 @@ class ClipProcessor:
         confidence_threshold: float = 0.05,
         keyframes_per_clip: int = 3,
         transcode_pusher: ZmqPusher | None = None,
+        motion_preprocessor: MotionAttentionPreprocessor | None = None,
     ):
         self.embedder = embedder
         self.db = db
@@ -40,6 +42,7 @@ class ClipProcessor:
         self.confidence_threshold = confidence_threshold
         self.keyframes_per_clip = keyframes_per_clip
         self.transcode_pusher = transcode_pusher
+        self.motion_preprocessor = motion_preprocessor or MotionAttentionPreprocessor()
 
         # Load rules from DB and compute text embeddings
         self.reload_rules()
@@ -67,7 +70,7 @@ class ClipProcessor:
         )
 
     def update_dynamic_settings(self, settings: dict):
-        """Update runtime settings like confidence_threshold, keyframes_per_clip, and telegram alerter."""
+        """Update runtime settings like confidence_threshold, keyframes_per_clip, telegram, and motion_attention."""
         if "rules" in settings and "confidence_threshold" in settings["rules"]:
             self.confidence_threshold = float(settings["rules"]["confidence_threshold"])
         if "model" in settings and "keyframes_per_clip" in settings["model"]:
@@ -78,19 +81,20 @@ class ClipProcessor:
                 self.alerter = TelegramAlerter(tg["bot_token"], tg.get("chat_id", ""))
             else:
                 self.alerter = None
+        if self.motion_preprocessor and "motion_attention" in settings:
+            self.motion_preprocessor.update_config(settings["motion_attention"])
         logger.info(
             "processor_dynamic_settings_updated",
             confidence_threshold=self.confidence_threshold,
             keyframes_per_clip=self.keyframes_per_clip,
-            telegram_enabled=self.alerter is not None
+            telegram_enabled=self.alerter is not None,
+            motion_attention_enabled=self.motion_preprocessor.config.enabled if self.motion_preprocessor else False,
         )
 
-    def extract_keyframes(self, video_path: str) -> list[Image.Image]:
+    def extract_keyframes(self, video_path: str) -> tuple[list[np.ndarray], list[Image.Image]]:
         """
         Extract uniformly spaced keyframes from a video clip.
-
-        For a clip with N total frames and K desired keyframes,
-        samples at indices: [0, N/(K-1), 2*N/(K-1), ..., N-1]
+        Returns (raw_rgb_frames, raw_pil_images).
         """
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -98,7 +102,7 @@ class ClipProcessor:
         if total_frames <= 0:
             logger.warning("empty_video", path=video_path)
             cap.release()
-            return []
+            return [], []
 
         # Calculate frame indices for uniform sampling
         n = min(self.keyframes_per_clip, total_frames)
@@ -109,22 +113,24 @@ class ClipProcessor:
                 int(i * (total_frames - 1) / (n - 1)) for i in range(n)
             ]
 
-        keyframes = []
+        raw_frames = []
+        pil_images = []
         for idx in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
-            if ret:
+            if ret and frame is not None:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                keyframes.append(Image.fromarray(rgb))
+                raw_frames.append(rgb)
+                pil_images.append(Image.fromarray(rgb))
 
         cap.release()
         logger.debug(
             "keyframes_extracted",
             path=video_path,
-            count=len(keyframes),
+            count=len(raw_frames),
             indices=indices
         )
-        return keyframes
+        return raw_frames, pil_images
 
     def classify_clip(
         self, image_embeddings: np.ndarray
@@ -184,16 +190,29 @@ class ClipProcessor:
         logger.info("processing_clip", clip_id=clip_id, path=file_path)
 
         # 1. Extract keyframes
-        keyframes = self.extract_keyframes(file_path)
-        if not keyframes:
+        raw_frames, raw_keyframes = self.extract_keyframes(file_path)
+        if not raw_keyframes:
             logger.warning("no_keyframes_extracted", clip_id=clip_id)
             self.db.mark_processed(clip_id, "DISCARDED")
             return
 
-        # 2. Generate image embeddings
-        image_embeddings = self.embedder.encode_images(keyframes)
+        # 2. Motion-Attention Frame Preprocessing (FR-3.1, FR-3.2)
+        if self.motion_preprocessor and self.motion_preprocessor.config.enabled:
+            focused_frames = self.motion_preprocessor.process_keyframes(raw_frames)
+            inference_keyframes = [Image.fromarray(f) for f in focused_frames]
+            logger.debug(
+                "motion_attention_applied",
+                clip_id=clip_id,
+                mode=self.motion_preprocessor.config.mode,
+                count=len(inference_keyframes),
+            )
+        else:
+            inference_keyframes = raw_keyframes
 
-        # 3. Classify against rules
+        # 3. Generate image embeddings using motion-focused keyframes
+        image_embeddings = self.embedder.encode_images(inference_keyframes)
+
+        # 4. Classify against rules
         action, matched_prompt, score, best_kf_idx = self.classify_clip(image_embeddings)
         logger.info(
             "clip_classified",
@@ -203,7 +222,7 @@ class ClipProcessor:
             score=f"{score:.3f}",
         )
 
-        # 4. Execute action
+        # 5. Execute action
         if action in ("DISCARD", "DISCARDED"):
             # Delete the physical file from disk
             try:
@@ -221,12 +240,12 @@ class ClipProcessor:
             )
             self.db.insert_vector(clip_id, clip_vec)
 
-            # Save best keyframe as thumbnail for UI
+            # Save best keyframe as thumbnail for UI (using raw keyframe for visual clarity)
             thumb_dir = Path("data/thumbnails")
             thumb_dir.mkdir(parents=True, exist_ok=True)
             thumb_path = str(thumb_dir / f"thumb_{clip_id}.jpg")
             try:
-                keyframes[best_kf_idx].save(thumb_path, format="JPEG", quality=85)
+                raw_keyframes[best_kf_idx].save(thumb_path, format="JPEG", quality=85)
             except Exception as e:
                 logger.error("thumbnail_save_failed", clip_id=clip_id, error=str(e))
                 thumb_path = None
@@ -242,7 +261,7 @@ class ClipProcessor:
 
             # Send Telegram alert if action is ALERT
             if "ALERT" in action.upper() and self.alerter:
-                snapshot = keyframes[best_kf_idx]
+                snapshot = raw_keyframes[best_kf_idx]
                 try:
                     asyncio.run(self.alerter.send_alert(
                         clip_id=clip_id,
@@ -278,6 +297,7 @@ class ProcessorWorker(threading.Thread):
         alerter: TelegramAlerter | None = None,
         confidence_threshold: float = 0.05,
         keyframes_per_clip: int = 3,
+        motion_attention_config: MotionAttentionConfig | None = None,
     ):
         super().__init__(name="ProcessorWorkerThread", daemon=True)
         self.db_path = db_path
@@ -288,6 +308,7 @@ class ProcessorWorker(threading.Thread):
         self.alerter = alerter
         self.confidence_threshold = confidence_threshold
         self.keyframes_per_clip = keyframes_per_clip
+        self.motion_attention_config = motion_attention_config
         self._stop_event = threading.Event()
         self.processor: ClipProcessor | None = None
 
@@ -301,6 +322,7 @@ class ProcessorWorker(threading.Thread):
 
         puller = ZmqPuller(self.zmq_pipeline_ipc)
         transcode_pusher = ZmqPusher(self.zmq_transcode_ipc)
+        motion_preprocessor = MotionAttentionPreprocessor(self.motion_attention_config)
 
         self.processor = ClipProcessor(
             embedder=self.embedder,
@@ -309,6 +331,7 @@ class ProcessorWorker(threading.Thread):
             confidence_threshold=self.confidence_threshold,
             keyframes_per_clip=self.keyframes_per_clip,
             transcode_pusher=transcode_pusher,
+            motion_preprocessor=motion_preprocessor,
         )
 
         try:

@@ -154,6 +154,15 @@ class Database:
             "telegram.enabled": "false",
             "telegram.bot_token": "",
             "telegram.chat_id": "",
+            "motion_attention.enabled": "true",
+            "motion_attention.mode": "gray",
+            "motion_attention.difference_threshold": "25",
+            "motion_attention.dilation_iterations": "3",
+            "motion_attention.dilation_kernel_size": "5",
+            "motion_attention.gray_blend_ratio": "0.8",
+            "motion_attention.blur_kernel_size": "31",
+            "motion_attention.mask_blur_kernel_size": "15",
+            "motion_attention.min_motion_area_pct": "0.05",
         }
 
         # Seed from config.yaml if available
@@ -186,6 +195,17 @@ class Database:
                         defaults["telegram.enabled"] = "true" if raw["telegram"].get("enabled", False) else "false"
                         defaults["telegram.bot_token"] = str(raw["telegram"].get("bot_token", ""))
                         defaults["telegram.chat_id"] = str(raw["telegram"].get("chat_id", ""))
+                    if "motion_attention" in raw and isinstance(raw["motion_attention"], dict):
+                        ma = raw["motion_attention"]
+                        defaults["motion_attention.enabled"] = "true" if ma.get("enabled", True) else "false"
+                        defaults["motion_attention.mode"] = str(ma.get("mode", "gray"))
+                        defaults["motion_attention.difference_threshold"] = str(ma.get("difference_threshold", 25))
+                        defaults["motion_attention.dilation_iterations"] = str(ma.get("dilation_iterations", 3))
+                        defaults["motion_attention.dilation_kernel_size"] = str(ma.get("dilation_kernel_size", 5))
+                        defaults["motion_attention.gray_blend_ratio"] = str(ma.get("gray_blend_ratio", 0.8))
+                        defaults["motion_attention.blur_kernel_size"] = str(ma.get("blur_kernel_size", 31))
+                        defaults["motion_attention.mask_blur_kernel_size"] = str(ma.get("mask_blur_kernel_size", 15))
+                        defaults["motion_attention.min_motion_area_pct"] = str(ma.get("min_motion_area_pct", 0.05))
         except Exception as e:
             logger.debug("seed_settings_yaml_read_error", error=str(e))
 
@@ -380,6 +400,17 @@ class Database:
                 "bot_token": raw.get("telegram.bot_token", ""),
                 "chat_id": raw.get("telegram.chat_id", ""),
             },
+            "motion_attention": {
+                "enabled": raw.get("motion_attention.enabled", "true").lower() in ("true", "1", "yes"),
+                "mode": raw.get("motion_attention.mode", "gray"),
+                "difference_threshold": int(raw.get("motion_attention.difference_threshold", 25)),
+                "dilation_iterations": int(raw.get("motion_attention.dilation_iterations", 3)),
+                "dilation_kernel_size": int(raw.get("motion_attention.dilation_kernel_size", 5)),
+                "gray_blend_ratio": float(raw.get("motion_attention.gray_blend_ratio", 0.8)),
+                "blur_kernel_size": int(raw.get("motion_attention.blur_kernel_size", 31)),
+                "mask_blur_kernel_size": int(raw.get("motion_attention.mask_blur_kernel_size", 15)),
+                "min_motion_area_pct": float(raw.get("motion_attention.min_motion_area_pct", 0.05)),
+            },
         }
 
     def update_settings(self, updates: dict) -> dict:
@@ -442,6 +473,42 @@ class Database:
                 kvs["telegram.bot_token"] = str(tg["bot_token"]).strip()
             if "chat_id" in tg:
                 kvs["telegram.chat_id"] = str(tg["chat_id"]).strip()
+
+        if "motion_attention" in updates and isinstance(updates["motion_attention"], dict):
+            ma = updates["motion_attention"]
+            if "enabled" in ma:
+                kvs["motion_attention.enabled"] = "true" if ma["enabled"] else "false"
+            if "mode" in ma:
+                m = str(ma["mode"]).strip().lower()
+                if m in ("gray", "blur"):
+                    kvs["motion_attention.mode"] = m
+            if "difference_threshold" in ma:
+                dt = max(1, min(int(ma["difference_threshold"]), 255))
+                kvs["motion_attention.difference_threshold"] = str(dt)
+            if "dilation_iterations" in ma:
+                di = max(1, min(int(ma["dilation_iterations"]), 20))
+                kvs["motion_attention.dilation_iterations"] = str(di)
+            if "dilation_kernel_size" in ma:
+                dk = max(3, min(int(ma["dilation_kernel_size"]), 31))
+                if dk % 2 == 0:
+                    dk += 1
+                kvs["motion_attention.dilation_kernel_size"] = str(dk)
+            if "gray_blend_ratio" in ma:
+                gbr = max(0.0, min(float(ma["gray_blend_ratio"]), 1.0))
+                kvs["motion_attention.gray_blend_ratio"] = str(round(gbr, 2))
+            if "blur_kernel_size" in ma:
+                bk = max(3, min(int(ma["blur_kernel_size"]), 101))
+                if bk % 2 == 0:
+                    bk += 1
+                kvs["motion_attention.blur_kernel_size"] = str(bk)
+            if "mask_blur_kernel_size" in ma:
+                mb = max(3, min(int(ma["mask_blur_kernel_size"]), 51))
+                if mb % 2 == 0:
+                    mb += 1
+                kvs["motion_attention.mask_blur_kernel_size"] = str(mb)
+            if "min_motion_area_pct" in ma:
+                mp = max(0.0, min(float(ma["min_motion_area_pct"]), 100.0))
+                kvs["motion_attention.min_motion_area_pct"] = str(round(mp, 3))
 
         if kvs:
             self.conn.executemany(
