@@ -55,6 +55,11 @@ class TelegramConfig:
     chat_id: str
     enabled: bool
 
+@dataclass
+class DebugConfig:
+    save_keyframes: bool = False
+    max_debug_clips: int = 10
+    debug_dir: str = "./data/debug_keyframes"
 
 @dataclass
 class AppConfig:
@@ -68,6 +73,7 @@ class AppConfig:
     zmq_ipc_path: str
     zmq_transcode_ipc_path: str
     log_level: str
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
 
 def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
@@ -90,6 +96,8 @@ def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
     rules_data = dict(raw.get("rules", {}))
     telegram_data = dict(raw.get("telegram", {}))
     motion_attention_data = dict(raw.get("motion_attention", {}))
+    debug_data = dict(raw.get("debug", {}))
+
 
     # Overlay from SQLite if database exists and use_db is True
     if use_db and Path(db_path).exists():
@@ -130,4 +138,5 @@ def load_config(path: str = "config.yaml", use_db: bool = True) -> AppConfig:
             "transcode_ipc_path", "ipc:///tmp/checkcam_transcode.sock"
         ),
         log_level=raw["logging"]["level"],
+        debug=DebugConfig(**debug_data),
     )
