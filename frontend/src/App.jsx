@@ -22,6 +22,7 @@ export default function App() {
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [selectedClip, setSelectedClip] = useState(null);
   const [systemStatus, setSystemStatus] = useState({ online: true, modelLoaded: true });
+  const [captureStatus, setCaptureStatus] = useState({ watching: false, status: 'standby' });
   const [isSearchResult, setIsSearchResult] = useState(false);
   const [lastQuery, setLastQuery] = useState('');
   const [rulesModalOpen, setRulesModalOpen] = useState(false);
@@ -30,11 +31,18 @@ export default function App() {
   const [newRuleDesc, setNewRuleDesc] = useState('');
   const [newRuleActionId, setNewRuleActionId] = useState(2);
 
-  // Initial load: fetch recent clips & health status
+  // Initial load: fetch clips, health, capture status & start polling
   useEffect(() => {
     fetchRecentClips();
     checkHealth();
+    checkCaptureStatus();
     fetchRulesAndActions();
+
+    const interval = setInterval(() => {
+      checkHealth();
+      checkCaptureStatus();
+    }, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   // Keyboard shortcut: Escape to close modal
@@ -54,10 +62,34 @@ export default function App() {
       const res = await fetch('/health');
       if (res.ok) {
         const data = await res.json();
-        setSystemStatus({ online: true, modelLoaded: data.model_loaded });
+        setSystemStatus({
+          online: true,
+          modelLoaded: data.model_loaded
+        });
       }
     } catch (e) {
-      setSystemStatus({ online: false, modelLoaded: false });
+      setSystemStatus({
+        online: false,
+        modelLoaded: false
+      });
+    }
+  };
+
+  const checkCaptureStatus = async () => {
+    try {
+      const res = await fetch('/api/capture/status');
+      if (res.ok) {
+        const data = await res.json();
+        setCaptureStatus({
+          watching: Boolean(data.watching),
+          status: data.status || 'standby'
+        });
+      }
+    } catch (e) {
+      setCaptureStatus({
+        watching: false,
+        status: 'standby'
+      });
     }
   };
 
@@ -186,9 +218,19 @@ export default function App() {
         </div>
 
         <div className="header-actions">
-          <div className="status-pill">
+          {/* AI Model Status */}
+          <div className={`status-pill ${systemStatus.online && systemStatus.modelLoaded ? 'status-pill-active' : 'status-pill-inactive'}`}>
             <span className="status-dot"></span>
             <span>{systemStatus.online ? 'Model Resident & Live' : 'Connecting...'}</span>
+          </div>
+
+          {/* Capture Daemon Status: Live Watching vs Disabled/Standby */}
+          <div 
+            className={`status-pill ${captureStatus.watching ? 'status-pill-active' : 'status-pill-standby'}`}
+            title={`Capture Daemon (${captureStatus.watching ? 'Active & Watching' : 'Disabled / Standby'})`}
+          >
+            <span className="status-dot"></span>
+            <span>{captureStatus.watching ? 'Capture Active' : 'Capture Disabled'}</span>
           </div>
 
           <button 

@@ -68,6 +68,43 @@
   font-size: 0.78rem;
   font-weight: 500;
   color: #34d399;
+  transition: all 0.2s ease;
+}
+
+.status-pill.status-pill-active {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+.status-pill.status-pill-active .status-dot {
+  background-color: var(--accent-emerald);
+  box-shadow: 0 0 10px var(--accent-emerald);
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+
+.status-pill.status-pill-inactive {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #f87171;
+}
+
+.status-pill.status-pill-inactive .status-dot {
+  background-color: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+  animation: none;
+}
+
+.status-pill.status-pill-standby {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+}
+
+.status-pill.status-pill-standby .status-dot {
+  background-color: #64748b;
+  box-shadow: none;
+  animation: none;
 }
 
 .status-dot {

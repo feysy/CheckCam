@@ -9,6 +9,7 @@ Architecture:
 Start with: uvicorn src.api:app --host 0.0.0.0 --port 8000
 """
 
+import subprocess
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -189,13 +190,59 @@ async def get_clip_video(clip_id: int):
 
 @app.get("/health")
 async def health_check():
-    """Basic health check."""
+    """Basic health check for API server, models, and database."""
     return {
         "status": "ok",
         "model_loaded": embedder is not None,
         "db_connected": db is not None,
         "processor_alive": processor_worker.is_alive() if processor_worker else False,
         "transcoder_alive": transcoder_worker.is_alive() if transcoder_worker else False,
+    }
+
+
+@app.get("/api/capture/status")
+async def get_capture_status():
+    """
+    Check if the camera capture daemon is actively watching.
+    Queries systemctl checkcam-daemon.service (with manual process fallback).
+    If inactive, the system is simply on standby / disabled, not in failure.
+    """
+    is_watching = False
+    service_status = "inactive"
+
+    # 1. Check systemctl is-active
+    try:
+        res = subprocess.run(
+            ["systemctl", "is-active", "checkcam-daemon.service"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        service_status = res.stdout.strip()
+        if service_status == "active":
+            is_watching = True
+    except Exception:
+        pass
+
+    # 2. Check standalone process fallback
+    if not is_watching:
+        try:
+            res = subprocess.run(
+                ["pgrep", "-f", "src.capture"],
+                capture_output=True,
+                text=True,
+                timeout=1
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                is_watching = True
+                service_status = "running"
+        except Exception:
+            pass
+
+    return {
+        "watching": is_watching,
+        "status": service_status,
+        "service": "checkcam-daemon.service",
     }
 
 
