@@ -54,10 +54,19 @@ graph TD
 
 ## 📋 Prerequisites
 
-- **OS**: Linux / macOS
+- **OS**: Linux (including Raspberry Pi OS Bookworm / Bullseye) / macOS
 - **Python**: 3.11+
 - **Node.js**: 18+ (for building the React frontend)
-- **Webcam**: Standard USB camera or RTSP stream
+- **Camera**:
+  - Standard USB Webcam
+  - Network RTSP / IP camera stream
+  - **Raspberry Pi Camera Module** (Camera Module 2, 3, HQ, Global Shutter via official `Picamera2`)
+
+> [!NOTE]
+> When running on a Raspberry Pi with an official CSI camera ribbon, install the system Picamera2 library:
+> ```bash
+> sudo apt install -y python3-picamera2
+> ```
 
 ---
 
@@ -68,8 +77,8 @@ graph TD
 ```bash
 cd CheckCam
 
-# Create virtual environment
-python3 -m venv .venv
+# Create virtual environment (allow system site-packages on Pi if using apt picamera2)
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 
 # Install dependencies
@@ -95,11 +104,15 @@ cd ..
 
 ### 4. Configuration
 
-Edit [config.yaml](.CheckCam/config.yaml) to configure your camera, thresholds, and optional Telegram bot:
+Edit [config.yaml](file:///home/yefe/Projects/Videos/CheckCam/config.yaml) to configure your camera, thresholds, and optional Telegram bot:
 
 ```yaml
 camera:
-  source: 0                 # 0 for USB webcam, or "rtsp://..."
+  # Camera Source Options:
+  #   - 0, 1, 2...         : USB webcam index
+  #   - "picam" or "rpi"   : Raspberry Pi CSI Camera Module (Picamera2)
+  #   - "rtsp://..."       : Network RTSP / IP camera stream
+  source: 0
   fps: 15
   resolution: [640, 480]
 

@@ -2,7 +2,11 @@
 
 # Camera source
 camera:
-  source: 0                    # 0 = default USB webcam, or RTSP URL string
+  # Options:
+  #   - 0, 1, 2...         : USB webcam index
+  #   - "picam" or "rpi"   : Raspberry Pi CSI Camera Module (via Picamera2)
+  #   - "rtsp://..."       : Network RTSP / IP camera stream
+  source: 0
   fps: 15                      # Capture framerate (lower = less CPU)
   resolution: [640, 480]       # Capture resolution [width, height]
 
